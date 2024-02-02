@@ -1,0 +1,2137 @@
+---
+title: "CEBUM"
+output: html_document
+date: "2023-12-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Installing Packages
+
+```{r}
+
+#if (!require("remotes")) install.packages("remotes")
+#remotes::install_github("philipp-baumann/simplerspec")
+
+#Info on package: 
+  #https://github.com/philipp-baumann/simplerspec/ & 
+  #https://github.com/philipp-baumann/simplerspec-read-filter-transform/blob/master/README.Rmd 
+
+#install.packages(c("simplerspec","ggfortify"))
+library(devtools)
+#install_github("vqv/ggbiplot")
+#library(simplerspec)
+# Simplerspec is a universal file reader that allows one to read selected parameters instrument, optic and acquisition parameters)
+
+
+
+suppressPackageStartupMessages({library(readxl)
+                 library(plyr)
+                 library(dplyr)
+                 library(tidyr)
+                 library(ggfortify)
+                 library(tibble)
+                 library(here)
+                 library(ggbiplot)
+                 library(tidyverse)
+                 library(reshape)
+                 library(reshape2)})
+```
+
+```{r}
+files <- list.files(full.names = TRUE)
+str(files)
+```
+
+The object `files` has the data structure *atomic vector*. *Atomic vectors* have six possible basic (*atomic*) vector types. These are *logical*, *integer*, *real*, *complex*, *string* (or *character*) and *mir*. Vector types can be returned by the R base function `typeof(x)`, which returns the type or internal storage mode an object `x`. For the `files` object it is
+
+```{r}
+# Check type of files object
+typeof(files)
+```
+
+# Section 02
+
+---
+title: "02Spectra_Data_Cleaning_Exploration"
+output: html_document
+date: "2023-07-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### OBJECTIVE of SCRIPT
+
+### Loading Libraries
+
+```{r}
+library(prospectr)
+library(ggplot2)
+library(dplyr)
+library(reshape)
+library(here)
+
+#setwd("/Users/Biochars/Library/CloudStorage/OneDrive-CIFOR-ICRAF/Documents/0All_Training/Spectroscopy Data Training-17th May 2023/Data")
+```
+
+## Extracting spectra, removing meta data, and briefly visualizing
+
+NOTES
+
+-   Melt functionally takes a dataframe from wide to long format
+
+```{r}
+
+flnm<-"Raw_spectra-MIR.csv"
+
+# Read spectra
+raw <- read.csv(flnm)
+raw[1:2,1:20]
+names(raw)[1:20]
+dim(raw)
+
+############ Remove spectra metadata ######
+ 
+raw0 <- raw[-c(1:36),-c(2:17)]
+## since the MIR samples included some blanks up to row 37
+raw0[1:4,1:4]
+
+wavenumbers <- round(as.numeric(substr(colnames(raw0[,-1]),2,100)),1)
+##FUSI: this is another way to remove the X that appears in the column names since the values are numeric
+
+colnames(raw0) <- c("SSN", wavenumbers)
+
+raw0[1:5,c(1:4,1700:1704)]
+
+# Create temporary SSNs incase there are repeat scans. The flat csv file retains the original assigned SSNs whether with repeats or not.
+
+length(unique(raw0$SSN))
+
+relabel <- length(grep('TRUE',duplicated(raw0[,1])))
+
+ifelse(relabel>0, raw0[,1] <- paste(raw0$SSN, 1:nrow(raw0),sep = "-"),raw0[,1] <- raw0[,1])
+
+#adds - 1, 2, 3 ... to id so each sample is unique
+
+spec.m <- melt(as.data.frame(raw0), id="SSN")
+
+
+p <- ggplot(data = spec.m, aes(x = as.numeric(as.vector(variable)),y = value,group = SSN)) +
+  
+  geom_line(size = 0.5, alpha = 0.1, col = 'brown') +
+  
+  ggtitle(strsplit(flnm,".csv")[[1]][1]) +
+  
+  xlim(rev(range(as.numeric(as.vector(spec.m$variable))))) +
+  
+  #note that the variable column refers to the wavenumber and the value column to the absorbance
+  ylim(range(spec.m$value)) + 
+  
+  # ylim(c(0,1.3)) +
+  
+  xlab(expression("Wavenumbers (cm)"^-1)) +
+  
+  ylab("Aborbance units") + 
+  #theme with white background
+  theme_bw() +
+  #eliminates background, gridlines, and chart border
+  theme(
+    plot.background = element_blank()
+    ,panel.grid.major = element_blank()
+    ,panel.grid.minor = element_blank()
+  )
+p <- p + theme(plot.title = element_text(hjust = 0.5))
+
+p <- p + theme(legend.position = "none")
+
+p <- p + theme(panel.background = element_rect(fill = "white"))
+
+p
+
+ggsave("Raw_spectra_plot_MIR.png")
+################################################################################
+```
+
+### Cleaning Spectra
+
+NOTES
+
+-   The 'up' and 'down' cleanups are based on:
+    -   So thinking about outliers: this is initially scanning the region between 2450-2500 - mainly this is probably a visual scan of the extracted dataset
+    -   then maybe one identifies a peak with wavenumber 2498.2 and decides to remove this because it has an absorbance above 1.8
+    -   the same is done for the peak at 3696.4 with absorbance below 1.1
+    -   then the spectra are recombined
+
+```{r}
+################## Clean Spectra ##############
+
+vrbs<-as.numeric(as.vector(spec.m$variable))
+
+##### Up
+spec.m[which(vrbs > 2450 & vrbs < 2500),]
+bdup<-which(spec.m$variable == 2498.2 & spec.m$value > 1.8)
+
+##### Down
+spec.m[which(vrbs > 3600 & vrbs < 3700),]
+bddwn<-which(spec.m$variable == 3696.4 & spec.m$value < 1.1)
+
+
+#extracting only the rows/samples in the spec.m dataframe that meet the above criteria defined for the bdup and bddwn dataframes
+spec.m2<-spec.m[which(spec.m$SSN %in% spec.m[c(bdup,bddwn),1]),]
+
+
+
+bd <- ggplot(data = spec.m2, aes(x = as.numeric(as.vector(variable)),y = value,group = SSN)) +
+  
+  geom_line(size = 0.5, alpha = 0.1, col = 'brown') + 
+  
+  xlim(rev(range(as.numeric(as.vector(spec.m2$variable))))) +
+  
+  ylim(range(spec.m2$value)) + xlab(expression("Wavenumbers (cm)"^-1)) +
+  
+  ylab("Aborbance units") + theme_bw()
+
+bd
+
+#Now redefining the spec.m dataframe to omit the samples that meet the bdup and bddwn criteria as these are defined here as outliers
+
+spec.m <- spec.m[which(!spec.m$SSN %in% spec.m[c(bdup,bddwn),1]),]
+
+  
+  
+############## Average spectra if in duplicate
+
+##FUSI edit 
+
+# Remove the suffix from SSN
+spec.m$SSN <- gsub("-\\d+$", "", spec.m$SSN)
+
+# Average the replicates
+avg_spec <- spec.m %>%
+  group_by(SSN, variable) %>%
+  summarise(value = mean(value, na.rm = TRUE))
+
+# Cast the melted data back to wide format
+raw0 <- dcast(avg_spec, SSN ~ variable, value.var = "value")
+
+#previous version
+#raw0 <- cast(spec.m, SSN~variable)
+dim(raw0)
+
+rownames(raw0) <- raw0$SSN
+
+names(raw0) <- c("SSN", paste0("X", names(raw0)[-1]))
+
+write.csv(raw0, paste0(getwd(),"/","model_",flnm),row.names = F)
+```
+
+```         
+```
+
+### Spectral Preprocessing
+
+-   The first chunk is only necessary if you have a model spectra already, and you want to combine it with the new data so you can preprocess it together, you (likely) won't have this in the beginning i.e. if you are working on developing the model so you can skip this chunk
+
+QUESTIONS
+
+-   The following code seems to be doing the same thing as the 04Overlaying_spectra script - are there main differences?
+
+TO DO
+
+-   Read about the mean-centering function and why it's done here
+
+Notes from Karari -
+
+-   may have to look into database to see how to beef up dataset
+
+-   if biochar does not share similar characteristics to Biochars data used to build ICRAF models ... ):
+
+```{r}
+#The following chunk is only necessary if you have a model spectra already, and you want to combine it with the 
+# new data so you can preprocess it together, you (likely) won't have this in the beginning i.e. if you are working on developing the model 
+# so you can skip this chunk 
+
+####################### Read model data and preprocess #########################
+# master<- read.csv("model-raw_spectra.csv")[,-c(2:17)]
+# dim(master)
+# master[1:5,1:5]
+# 
+# wavenumbers <- round(as.numeric(substr(colnames(master[,-1]),2,100)),1)
+# 
+# colnames(master) <- c("SSN", wavenumbers)
+# 
+# #Bind model and new data
+# nwraw0 <- bind_rows(master,nwraw0)
+# length(unique(nwraw0$SSN))
+################################################################################
+
+
+
+nwraw0 <- raw0
+
+wavenumbers <- round(as.numeric(substr(colnames(nwraw0[,-1]),2,100)),1)
+##FUSI: this is another way to remove the X that appears in the column names since the values are numeric
+
+colnames(nwraw0) <- c("SSN", wavenumbers)
+
+#FUSI EDIT: also removed bands below 650 as per Lago
+
+##################################### Spectra pre-treatment ###################
+#remove the CO2 region from all data
+
+#FUSI EDIT: commenting out this section because for this dataset, co2 is empty 
+
+# wavenumbers_1 <- colnames(nwraw0[,-1])
+# co2 <- which(wavenumbers_1 < 2380 & wavenumbers_1 > 2350) # Get co2 bands
+# nwraw0 <- nwraw0[,-c(co2+1)]
+# dim(nwraw0)
+# nwraw0[1:5,1:5]
+```
+
+### Savitzky Golay and Mean Centering
+
+```{r}
+
+#SavitzkyGolay pretreatment
+#FUSI NOTES: Takes the first derivative and smooths the spectra
+
+#often used as a preliminary preprocessing step to resolve overlapping signals, enhance signal properties, and suppress unwanted spectral features that arise due to nonideal instrument and sample properties."
+
+
+
+spec_der<-as.data.frame(savitzkyGolay(nwraw0[,-1], w=17, p=2, m=1))
+
+#Mean-centering function
+center_colmeans <- function(x) {
+  xcenter = colMeans(x)
+  x - rep(xcenter, rep.int(nrow(x), ncol(x)))
+}
+
+#Mean-centering
+spec_der.mc_trt<-center_colmeans(spec_der)
+
+spec_trt<-bind_cols(SSN=nwraw0$SSN,spec_der.mc_trt)
+
+#FUSI EDIT
+
+saveRDS(spec_trt,"spec_trt_MIR.RDS")
+ 
+```
+
+### Plot of pretreted spectral
+
+```{r}
+
+spec_pretreat <- melt(as.data.frame(spec_trt), id="SSN")
+
+plot_pretreat <- ggplot(data = spec_pretreat, aes(x = variable,y = value,group = SSN)) +
+  #as.numeric(as.vector(
+  geom_line(size = 0.5, alpha = 0.1, col = 'brown') +
+  
+  ggtitle(strsplit(flnm,".csv")[[1]][1]) +
+  
+ # xlim(rev(range(as.numeric(as.vector(spec_trt$variable))))) +
+  
+  #note that the variable column refers to the wavenumber and the value column to the absorbance
+ # ylim(range(spec_trt$value)) + 
+  
+  # ylim(c(0,1.3)) +
+  
+  xlab(expression("Wavenumbers (cm)"^-1)) +
+  
+  ylab("Mean-Centered Derivative of Aborbance") + 
+  #theme with white background
+  theme_bw() +
+  #eliminates background, gridlines, and chart border
+  theme(
+    plot.background = element_blank()
+    ,panel.grid.major = element_blank()
+    ,panel.grid.minor = element_blank()
+  )
+plot_pretreat
+```
+
+### PCA Plots
+
+QUESTIONS:
+
+-   This is part of the overlay process to see if the model data casts in the same spectral space as the second dataset, correct?
+-   prcomp function
+    -   default centers the data - but we've already done mean-centering - so does this do nothing?
+
+```{r}
+
+#Plot PCA scores plot overlay
+dsnv <- spec_trt
+
+pcs <- prcomp(dsnv[,-c(1:2)]) 
+#FUSI EDIT: also removed the first data row since it's all NA's 
+
+pcss <- pcs$x[,1:10]
+
+pcss[1:6,]
+
+plot(pcss)
+
+#FUSI EDIT
+#visualizing the loadings 
+pcs$rotation
+pcs
+
+#FUSI EDIT: The original code was calib <- dim(master)[1]; but this refers to the master which as defined above is based on data used to develop the model
+# I changed it to refer to nwraw0 here because that is the data being used to develop the model
+#noting also that 'calib' has no significance to calibration here - just kept the same variable name for ease
+calib <- dim(nwraw0)[1]
+
+
+#calib <- dim(master)[1]
+
+points(pcss[1:calib,1:2], col = "red")
+
+points(pcss[-c(1:calib),1:2], col = "blue")
+
+var <- round(summary(pcs)$importance[2,] * 100, 1)
+
+scores <- cbind("Calib",as.data.frame(pcs$x[,1:5])) # get first 5 principal components
+
+names(scores) <- c("set", colnames(scores[,-1]))
+
+scores <- as.matrix(scores)
+
+scores[-c(1:calib),1] <- "New samples"
+
+scores <- as.data.frame(scores)
+
+write.csv(scores, file = "./Calib and Pred scores MIR.csv", row.names = FALSE)
+
+scores <- read.csv("./Calib and Pred scores MIR.csv")
+
+#sp <- sp +  labs(color = "set")
+sp <- ggplot(scores, aes(x = PC1, y =PC2, colour = set)) +
+  
+  geom_point(size = 0.8, alpha = 0.85 ) +
+  
+  ggtitle("PCA scores plot") +
+  
+  
+  xlab(paste0("PC1 explains ", var[1], "% total variance")) +
+  
+  ylab(paste0("PC2 explains ", var[2], "% total variance")) +
+  
+  theme_bw() +
+  
+  theme(
+    plot.background = element_blank()
+    ,panel.grid.major = element_blank()
+    ,panel.grid.minor = element_blank()
+  )
+sp <- sp + theme(plot.title = element_text(hjust = 0.5))
+
+sp <- sp + scale_color_manual(values =c("brown","orange"))
+
+sp
+
+ggsave(filename  = "./Biochar_scores_MIR.png", height = 6, width = 6,sp)
+  
+```
+
+## Fusi Edits
+
+### PC 3 & 4
+
+```{r}
+
+sp <- ggplot(scores, aes(x = PC3, y =PC4, colour = set)) +
+  
+  geom_point(size = 0.8, alpha = 0.85 ) +
+  
+  ggtitle("PCA scores plot") +
+  
+  
+  xlab(paste0("PC2 explains ", var[3], "% total variance")) +
+  
+  ylab(paste0("PC3 explains ", var[4], "% total variance")) +
+  
+  theme_bw() +
+  
+  theme(
+    plot.background = element_blank()
+    ,panel.grid.major = element_blank()
+    ,panel.grid.minor = element_blank()
+  )
+sp <- sp + theme(plot.title = element_text(hjust = 0.5))
+
+sp <- sp + scale_color_manual(values =c("brown","orange"))
+
+sp
+
+```
+
+Biplot: the arrows represent the original variables, and the direction and length of the arrows indicate the variable's contribution to the principal components
+
+-   the position of a point represents the projection of the observation into the reduced-dimensional space defined by the principal components
+
+```{r}
+
+# Calculate the absolute values of loadings
+absolute_loadings <- abs(pcs$rotation)
+#This line calculates the absolute values of loadings, where pcs is the result of the PCA. Loadings represent the contribution of each original variable to the principal components.
+
+# Create a variable importance plot for the first few principal components
+barplot(absolute_loadings[, 1:2], beside = TRUE, col = rainbow(5), 
+        main = "Variable Importance for PC1-PC2", 
+        #names.arg = colnames(absolute_loadings[, 1:2]), 
+        cex.names = 0.7, las = 2)
+#This line creates a bar plot representing the variable importance for the first two principal components (PC1 and PC2).
+
+# Identify the top 10 loaded variables for each principal component
+top_loaded_variables <- apply(absolute_loadings, 2, function(x) head(order(-x), 10))
+
+# biplot that combines the loading plot and the score plot
+
+# Set row names of scores matrix to NULL to remove sample IDs
+rownames(pcs$x) <- NULL
+
+suppressWarnings({
+  biplot(pcs, scale = 0)
+})
+
+suppressWarnings({
+biplot(pcs, scale = 1, pc.biplot = TRUE)
+})
+#This line creates a biplot, which combines the loading plot and the score plot. In the context of PCA, a biplot shows both the relationships between the variables and the relationships between the observations (scores).
+
+```
+
+# Section 03
+
+-   note:
+
+    -   section 03: Kennard Stone is not used for the Cornell MIR files, because we don't need to split and determine which samples need to be sent for wet chem analysis since we already have the wet chem data (for whichever samples)
+
+# Section 04
+
+-   note:
+
+    -   section 04: Overlaying, also not used here since we don't have any sort of reference model file
+
+# Section 05
+
+## PLS Model
+
+---
+title: "05CalibrationModels_PLS_Loop_ARC"
+output: html_document
+date: "2023-07-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+\_ two ways of doing predictions (1) with an existing model that was built some time ago and (2) in this case when you have the spectral and wet chem data and you have to develop the model
+
+Reference data = wet chemistry data of the full 100 samples (being used to develop the model)
+
+QUESTION:
+
+-   What does this portion of the code do?: spectraldata.fin\<-spectraldata[is.element(spectraldata\$SSN, df.f\$SSN),]
+
+-   assuming the file spectral data is reading is referring to the selected samples from section 03?
+
+-   or which method of splitting calibration and training data is used? KS or the random setseed123 used later in this script?
+
+```{r}
+library(dplyr)
+library(prospectr)
+library (globals)
+library(stringr)
+library(ggplot2)
+library(here)
+```
+
+Load Reference data
+
+```{r}
+
+# spectraldata=read.csv("Raw_spectra-MIR.csv")
+spec_trt <- readRDS("spec_trt_MIR.RDS")
+spec_trt <- spec_trt[,-2] #removing the data for the first wavenumber since it's all NAN's
+
+# #rownames(spectraldata)<-spectraldata$SSN
+# 
+# 
+# #Remove metadata columns when using raw file
+#  names(spectraldata)
+#  spectraldata<-spectraldata[-c(1:36),] #removing the standards
+#  spectraldata<-spectraldata[,-2:-17] #removing metadata
+#  
+# # #Ensure all the wavenumbers are rounded to one decimal place
+#  names(spectraldata)=round(as.numeric(str_sub(names(spectraldata),2)),1)
+#  names(spectraldata)[1] <- "SSN"
+
+#Read reference data
+df1=read.csv("CEBUM_Reference_Data.csv")#, skip=5)#[,c(1,8:29)]
+
+#TEMPORARY, UNTIL I RECIEVE THE REMAINING DATA 
+#df1<-df1[c(1:84),-c(5:24)]
+
+
+colnames(df1)[1]<-"SSN"
+#colnames(df1)[3]<-"char_type"
+
+#FUSI EDIT: put this cleanup chunk earlier to then filter out the columns where there isn't enough data, and then be able to define  slprptr based on the cleaned data 
+# 
+
+# #Remove unwanted characters in the data
+# df.f[sapply(df.f, grepl, pattern = "<")] <- "NA"
+dnmrc <- df1[,-c(1:4)] %>% mutate_if(is.character, as.numeric)
+df1 <- bind_cols(df1[,c(1:4)],dnmrc)
+
+#FUSI EDIT - errors out becauseo of duplicated? REVISIT
+#Revisited - added back after selecting only the samples with ref data 
+#KARARI
+
+rownames(df1)<-df1$SSN
+
+
+# 
+# 
+# ##################################### Spectra pre-treatment ###################
+# #remove the CO2 region from all data
+# co2rem<-which((as.numeric(colnames(spectraldata[-1]))) < 2380 & (as.numeric(colnames(spectraldata[-1]))) > 2350)
+# spectraldata.f<-spectraldata[,-co2rem]
+# 
+# #Mean-centering function
+# center_colmeans <- function(x) {
+#   xcenter = colMeans(x)
+#   x - rep(xcenter, rep.int(nrow(x), ncol(x)))
+# }
+# 
+# #SavitzkyGolay pretreatment
+# spec_der<-as.data.frame(savitzkyGolay(spectraldata.f[,-1], w=17, p=2, m=1))
+# 
+# #Mean-centering
+# spec_der.mc_trt<-center_colmeans(spec_der)
+# 
+# spec_trt<-bind_cols(SSN=spectraldata$SSN,spec_der.mc_trt)
+
+###############################################################################
+
+#FUSI EDIT: ... define what raw0 is
+#Also: this variable isn't used really
+#spectraldata<- raw0
+
+
+ #select only the common Biochar samples in spectral and wet chemie data
+df.f<-df1[is.element(df1$SSN, spec_trt$SSN),]
+
+#Create a df.f that isn't overided
+df.f_master <-df.f
+
+#FUSI EDIT: put this cleanup chunk earlier to then filter out the columns where there isn't enough data, and then be able to define  slprptr based on the cleaned data 
+# 
+# # #Remove unwanted characters in the data
+# df.f[sapply(df.f, grepl, pattern = "<")] <- "NA"
+# dnmrc <- df.f[,-1] %>% mutate_if(is.character, as.numeric)
+# df.f <- bind_cols(SSN = df.f[,1],dnmrc)
+
+#FUSI EDIT: 
+#filtering and removing the columns (reference variables) where more than 70% of data is missing/NA
+```
+
+```{r}
+
+threshold_na <- 0.85 #for a 70% cut-off
+
+df.f<-
+  df.f %>% select(where(~mean(is.na(.)) < threshold_na))
+
+spectraldata.fin.fin<-spec_trt[is.element(spec_trt$SSN, df.f$SSN),] ## FUSI Still unclear what this is for. Changed to reference spec_trt
+
+#Set splitting proportion for the calibration and validation data
+set.seed(123)
+pool=df.f[sample(nrow(df.f), round(0.3*nrow(df.f),0)), ]
+pool<-pool[order(pool$SSN),]
+poolid<-pool$SSN  
+```
+
+## Partial Least Squares Regression
+
+Loading libraries
+
+```{r, warning=FALSE}
+##################### Random Forest Modelling #################################
+library(randomForest)
+library(caret)
+library(pls)
+library(data.table)
+#If package ithir is not available for your version of R
+#Use the 3 below lines to install package ithir
+# install.packages("devtools") 
+# library(devtools)
+# install_bitbucket("brendo1001/ithir/pkg") or devtools::install_bitbucket("brendo1001/ithir/pkg")
+
+library(ithir)
+#used to extract model statistics like RMSE etc.
+#using a function called: goof: see here: https://rdrr.io/rforge/ithir/src/R/goof.R 
+```
+
+### PLSR Model
+
+```{r}
+
+#Available properties to predict
+#Incase you want to predict only selected properties,
+#get property position by running line 66. Remove hash sign between ")" and "["
+#symbols on line 67. Edit properties position and run line 67.
+#Always ensure position 1 in always included.
+
+#FUSI EDIT 
+# changed the call to reference df.f and not df1 because df.f has columns removed for samples that don't have enough data 
+# also removed the columns for char and char type
+
+names(df.f)
+slprptr<-names(df.f[-c(2:4)]) #FUSI EDIT: removing metadata columns
+
+pred<-as.data.frame(spec_trt[,1])
+colnames(pred)<-"SSN"
+
+mdl.stats<-NULL#Model stats container
+
+#FUSI EDIT: started at 3, instead of 2 because the first column in the char type
+for(p in 23:length(slprptr)){
+
+#Select properties to predict one at a time and remove NAs  
+df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
+
+
+#Plot and print Biochar properties boxplots
+boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
+dir.create("Plots_Boxplots_PLSR_MIR")
+png(paste0(getwd(),"/Plots_Boxplots_PLSR_MIR/",slprptr[p],".png"))
+print(boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = ""))
+dev.off()
+
+# #Split samples inside loop for variables with many NAs
+# #Set splitting proportion for the calibration and validation data
+set.seed(123)
+pool=df.f[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
+pool<-pool[order(pool$SSN),]
+poolid<-pool$SSN
+
+#Get calibration and validation datasets
+val_df<-pool
+cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+
+# threshold to exclude the extreme 5% values
+#KARARI UPDATE; 95% loses too many samples, changed to 99% 
+
+cal_df <-subset(cal_df1, cal_df1[,2]>quantile(cal_df1[,2], 0.01)&cal_df1[,2] <quantile(cal_df1[,2], 0.99))
+val_df1 <-subset(df.sel, (df.sel$SSN %in% val_df$SSN))
+val_df <-subset(val_df1, val_df1[,2]>quantile(val_df1[,2], 0.01)&val_df1[,2] <quantile(val_df1[,2], 0.99))
+#FUSI EDIT: first chunk is initial code - for some reason wasn't actually orering the dataframe. second chunk is my edit
+#renames the non-working version with suffice _or
+val_df_or<-val_df[order(rownames(val_df)),]
+cal_df_or<-cal_df[order(rownames(cal_df)),]
+
+val_df<-setorder(val_df)
+cal_df<-setorder(cal_df)
+
+#Subset pre-treated spectra by available reference data
+val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
+cal_spec<-spec_trt[is.element(spec_trt$SSN, cal_df$SSN),]
+cal_spec<-cal_spec[order(cal_spec$SSN),]
+val_spec<-val_spec[order(val_spec$SSN),]
+
+
+#Get no of calibration and validation datasets
+N_cal<-nrow(cal_spec)
+N_val<-nrow(val_spec)
+
+#Model data
+Xcal.f=cal_spec[,-1]
+Xval.f=val_spec[,-1]
+dfcal.f=cal_df[,-1]
+dfval.f=val_df[,-1]
+
+###### PLSR SOC
+maxc <- 10  ## number of max components
+#FUSI EDIT: max was 25
+pls.md <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp=maxc, validation = "CV", segments = 10)#10-fold CV
+#Each iteration of the cross-validation process involves training the model on 9 of the 10 segments and testing it on the remaining segment, repeating this process 10 times to ensure each segment is used as a test set once.
+
+## plot RMSEP vs. number of components
+plot(pls.md, "val", main=slprptr[p]) 
+
+dir.create("Components_plots_PLSR_MIR")
+png(paste0(getwd(),"/Components_plots_PLSR_MIR/",slprptr[p],".png"))
+print(plot(pls.md, "val", main=slprptr[p]))
+dev.off()
+
+## no. components to use, the one with the smallest adj RMSEP value
+RMSEP.obj<-RMSEP(pls.md)
+str(RMSEP.obj)
+
+RMSEP.obj$val[1:2,1,]
+nc <- as.numeric(sub("comps", "", names(which.min(RMSEP.obj$val[1,1,2:dim(RMSEP.obj$val[1:2,1,])[2]]))))
+nc
+
+#Generate relevant model name
+md.nm<-paste0("pls.md.", slprptr[p], ".nc", nc)
+
+#Rename model with the looped Biochar property
+assign(x = md.nm, value = get("pls.md", pos = .GlobalEnv), pos = .GlobalEnv)
+
+## predict to validation dataset
+pls.prd <- predict(pls.md, ncomp = nc, newdata = Xval.f)
+
+## Return prediction statistics
+val.stats=round(goof(dfval.f, pls.prd, type = "spec"),3)
+val.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_val"), Comps="", N=N_val, val.stats)
+val.stats
+
+## calibration statistics
+pls.pc <- predict(pls.md, ncomp = nc, newdata = Xcal.f)
+
+pls.cal=round(goof(dfcal.f, pls.pc, type = "spec"),3)
+cal.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_cal"), Comps=as.character(nc), N=N_cal, pls.cal)
+cal.stats
+
+################### Get model statistics #########################
+mdstats<-bind_rows(cal.stats, val.stats)
+
+#Create model stats labels for the plot
+#FUSI EDIT: Removed comps from before N because plot was crowded should add back in and only remove in plot below 
+slct.stats<-as.data.frame(t(mdstats[,c("Property","N","R2","RMSE","bias","RPIQ" )])) 
+names(slct.stats)<-NULL
+slct.stats<-bind_cols(rownames(slct.stats),slct.stats[,2])
+
+#FUSI EDIT: added "comps" because it is in slct.stats 
+valbls<-paste0(c("N","R2","RMSE","bias","RPIQ"), "\n")
+valsts<-paste0(c(slct.stats[2,2],slct.stats[3,2],slct.stats[4,2],slct.stats[5,2],slct.stats[6,2]))
+valstats<-paste(valbls,valsts)
+
+#Bind all looped properties model stats
+mdl.stats<-bind_rows(mdl.stats,mdstats)
+
+
+lgth<-length(sort(dfval.f,decreasing=F))
+
+seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)
+
+#Plot validation plot
+plot(dfval.f,pls.prd,pch=10,
+     xlab=paste('Measured',names(val_df)[2],sep="_"),
+     ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+     xlim = range(c(dfval.f,pls.prd)),
+     ylim = range(c(dfval.f,pls.prd)),
+     mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+     )   ## plot the predicted vs. measured in the validation
+abline(a = 0, b = 1)
+
+
+dir.create("Plots_Validationplots_PLSR_MIR")
+png(paste0(getwd(),"/Plots_Validationplots_PLSR_MIR/",slprptr[p],".png"))
+print(plot(dfval.f,pls.prd,pch=10,
+           xlab=paste('Measured',names(val_df)[2],sep="_"),
+           ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+           xlim = range(c(dfval.f,pls.prd)),
+           ylim = range(c(dfval.f,pls.prd)),
+           mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+           ))
+abline(a = 0, b = 1)
+dev.off()
+
+
+################### Predict all samples #########################
+prd.smpls <- predict(pls.md, spec_trt[,-1])
+
+prd<-as.data.frame(prd.smpls)
+df.prd<-bind_cols(SSN=rownames(prd),prd[,nc])
+colnames(df.prd)<-c("SSN",slprptr[p])
+
+pred<-merge(pred, df.prd, by="SSN", all.x = T)
+}
+#FUSI EDIT: End of for loop
+
+
+# Add two new columns based on whether the Property contains "_val" or "_cal"
+mdl.stats <- mdl.stats %>%
+  mutate(Property_Name = gsub("(_cal|_val).*", "", Property),
+         Data_Type = ifelse(grepl("_val", Property), "_val", "_cal"))
+#Write model statistics and predicted values to the local drive
+write.csv(mdl.stats, paste0(getwd(),"/Model_Statistics_PLSR_MIR.csv"),row.names = F)
+write.csv(pred, paste0(getwd(),"/Predicted_Biochar_Properties_PLSR_MIR.csv"),row.names = F)
+getwd()
+
+```
+
+```{r}
+
+
+# Add two new columns based on whether the Property contains "_val" or "_cal"
+mdl.stats_PLSR_MIR <- mdl.stats %>%
+  mutate(Property_Name = gsub("(_cal|_val).*", "", Property),
+         Data_Type = ifelse(grepl("_val", Property), "_val", "_cal"))
+
+#Write model statistics and predicted values to the local drive
+write.csv(mdl.stats_PLSR_MIR, paste0(getwd(),"/Model_Statistics_PLSR_MIR.csv"),row.names = F)
+write.csv(pred, paste0(getwd(),"/Predicted_Biochar_Properties_PLSR_MIR.csv"),row.names = F)
+getwd()
+
+# Filter out rows with missing R2 values
+mdl.stats_filtered <- mdl.stats_PLSR_MIR[complete.cases(mdl.stats_PLSR_MIR$R2), ]
+
+# Order the properties based on R2 values in descending order for _cal data
+ordered_props_cal <- mdl.stats_filtered[mdl.stats_filtered$Data_Type == "_cal", ]
+ordered_props_cal <- ordered_props_cal[order(-ordered_props_cal$R2), "Property_Name"]
+top_properties_cal <- head(ordered_props_cal, 10)
+
+# Filter the original dataframe for the selected top properties and both _cal and _val data
+mdl.stats_top <- mdl.stats_filtered[mdl.stats_filtered$Property_Name %in% top_properties_cal, ]
+
+# Create a new factor variable to control the order of bars
+mdl.stats_top$Property_Name <- factor(mdl.stats_top$Property_Name, levels = top_properties_cal)
+
+# Plotting
+cal_val_top_plot <- ggplot(mdl.stats_top, aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  labs(title = "Top Properties with Highest R2 for _cal and _val Data_Types",
+       x = "Property",
+       y = "R2") +
+  theme_minimal()
+
+# Save the plot
+ggsave(paste0(getwd(), "/cal_val_PLSR_MIR", ".png"),
+       plot = cal_val_top_plot,
+       width = 8,
+       height = 6, 
+       units = "in",
+       dpi = 300)
+```
+
+## Random Forest
+
+```{r}
+
+#Available properties to predict
+#Incase you want to predict only selected properties,
+#get property position by running line 66. Remove hash sign between ")" and "["
+#symbols on line 67. Edit properties position and run line 67.
+#Always ensure position 1 in always included.
+
+
+names(df.f)
+slprptr<-names(df.f[-c(2:4)]) #FUSI EDIT: removing metadata columns
+
+pred<-as.data.frame(spec_trt[,1])
+colnames(pred)<-"SSN"
+
+mdl.stats<-NULL#Model stats container
+
+for(p in 23:length(slprptr)){
+  
+#Select properties to predict one at a time and remove NAs  
+df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
+
+#Plot and print Biochar properties boxplots
+boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
+dir.create("Plots_Boxplots_RF_MIR")
+png(paste0(getwd(),"/Plots_Boxplots_RF_MIR/",slprptr[p],".png"))
+print(boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = ""))
+dev.off()
+
+# #Split samples inside loop for variables with many NAs
+# #Set splitting proportion for the calibration and validation data
+set.seed(123)
+pool=df.f[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
+pool<-pool[order(pool$SSN),]
+poolid<-pool$SSN
+
+#Get calibration and validation datasets
+val_df<-pool
+cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+# threshold to exclude the extreme 5% values
+cal_df <-subset(cal_df1, cal_df1[,2]>quantile(cal_df1[,2], 0.05)&cal_df1[,2] <quantile(cal_df1[,2], 0.95))
+val_df1 <-subset(df.sel, (df.sel$SSN %in% val_df$SSN))
+val_df <-subset(val_df1, val_df1[,2]>quantile(val_df1[,2], 0.05)&val_df1[,2] <quantile(val_df1[,2], 0.95))
+
+
+#FUSI EDIT: first chunk is initial code - for some reason wasn't actually orering the dataframe. second chunk is my edit
+#renames the non-working version with suffice _or
+val_df_or<-val_df[order(rownames(val_df)),]
+cal_df_or<-cal_df[order(rownames(cal_df)),]
+
+val_df<-setorder(val_df)
+cal_df<-setorder(cal_df)
+
+
+#Subset pre-treated spectra by available reference data
+val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
+cal_spec<-spec_trt[is.element(spec_trt$SSN, cal_df$SSN),]
+cal_spec<-cal_spec[order(cal_spec$SSN),]
+val_spec<-val_spec[order(val_spec$SSN),]
+
+
+#Get no of calibration and validation datasets
+N_cal<-nrow(cal_spec)
+N_val<-nrow(val_spec)
+
+#Model data
+Xcal.f=cal_spec[,-1]
+Xval.f=val_spec[,-1]
+dfcal.f=cal_df[,-1]
+dfval.f=val_df[,-1]
+
+rf.md <- randomForest(Xcal.f, dfcal.f, ntree=500, mtry=10, importance=TRUE) #500 10
+
+#Generate relevant model name
+md.nm<-paste("rf.md",slprptr[p],sep=".")
+
+#Rename model with the looped Biochar property
+assign(x = md.nm, value = get("rf.md", pos = .GlobalEnv), pos = .GlobalEnv)
+
+## predict to validation dataset
+rf.prd <- predict(rf.md, Xval.f)
+
+
+## Return prediction statistics
+val.stats=round(goof(dfval.f,rf.prd, type = "spec"),3)
+val.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_val"),N=N_val,val.stats)
+val.stats
+## calibration statistics
+rf_pc <- predict(rf.md, Xcal.f)
+rf.cal=round(goof(dfcal.f,rf_pc, type = "spec"),3)
+cal.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_cal"),N=N_cal,rf.cal)
+cal.stats
+
+################### Get model statistics #########################
+mdstats<-bind_rows(cal.stats,val.stats)
+
+#Create model stats labels for the plot
+slct.stats<-as.data.frame(t(mdstats[,c("Property","N","R2","RMSE","bias","RPIQ" )]))
+names(slct.stats)<-NULL
+slct.stats<-bind_cols(rownames(slct.stats),slct.stats[,2])
+valbls<-paste0(c("N","R2","RMSE","bias","RPIQ"), "\n")
+valsts<-paste0(c(slct.stats[2,2],slct.stats[3,2],slct.stats[4,2],slct.stats[5,2],slct.stats[6,2]))
+valstats<-paste(valbls,valsts)
+
+#Bind all looped properties model stats
+mdl.stats<-bind_rows(mdl.stats,mdstats)
+
+
+lgth<-length(sort(dfval.f,decreasing=F))
+
+seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)
+
+#Plot validation plot
+plot(dfval.f,rf.prd,pch=10,
+     xlab=paste('Measured',names(val_df)[2],sep="_"),
+     ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+     xlim = range(c(dfval.f,rf.prd)),
+     ylim = range(c(dfval.f,rf.prd)),
+     mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+     )   ## plot the predicted vs. measured in the validation
+abline(a = 0, b = 1)
+
+
+dir.create("Plots_Validationplots_RF_MIR")
+png(paste0(getwd(),"/Plots_Validationplots_RF_MIR/",slprptr[p],".png"))
+print(plot(dfval.f,rf.prd,pch=10,
+           xlab=paste('Measured',names(val_df)[2],sep="_"),
+           ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+           xlim = range(c(dfval.f,rf.prd)),
+           ylim = range(c(dfval.f,rf.prd)),
+           mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+           ))
+abline(a = 0, b = 1)
+dev.off()
+
+
+################### Predict all samples #########################
+prd.smpls <- predict(rf.md, spec_trt[,-1])
+
+prd<-as.data.frame(prd.smpls)
+df.prd<-bind_cols(SSN=rownames(prd),prd)
+colnames(df.prd)<-c("SSN",slprptr[p])
+
+pred<-merge(pred,df.prd,by="SSN", all.x = T)
+}
+
+#Remove the least reliably predicted texture data (Clay,Sand or Silt)
+#Recalculate the removed texture data to make Clay+Sand+Silt=100% content
+# if(which(colnames(pred) %in% "Silt")>1){
+#   pred<-pred[,-which(colnames(pred) %in% "Silt")]
+# }else{}
+
+# Add two new columns based on whether the Property contains "_val" or "_cal"
+mdl.stats <- mdl.stats %>%
+  mutate(Property_Name = gsub("(_cal|_val).*", "", Property),
+         Data_Type = ifelse(grepl("_val", Property), "_val", "_cal"))
+
+#Write model statistics and predicted values to the local drive
+write.csv(mdl.stats, paste0(getwd(),"/Model_Statistics_RF_MIR.csv"),row.names = F)
+write.csv(pred, paste0(getwd(),"/Predicted_Biochar_Properties_RF_MIR.csv"),row.names = F)
+getwd()
+
+```
+
+```{r}
+
+# Add two new columns based on whether the Property contains "_val" or "_cal"
+mdl.stats_RF_MIR <- mdl.stats %>%
+  mutate(Property_Name = gsub("(_cal|_val).*", "", Property),
+         Data_Type = ifelse(grepl("_val", Property), "_val", "_cal"))
+
+#Write model statistics and predicted values to the local drive
+write.csv(mdl.stats_RF_MIR, paste0(getwd(),"/Model_Statistics_RF_MIR.csv"),row.names = F)
+write.csv(pred, paste0(getwd(),"/Predicted_Biochar_Properties_RF_MIR.csv"),row.names = F)
+getwd()
+
+# Filter out rows with missing R2 values
+mdl.stats_filtered <- mdl.stats_RF_MIR[complete.cases(mdl.stats_RF_MIR$R2), ]
+
+# Order the properties based on R2 values in descending order for _cal data
+ordered_props_cal <- mdl.stats_filtered[mdl.stats_filtered$Data_Type == "_cal", ]
+ordered_props_cal <- ordered_props_cal[order(-ordered_props_cal$R2), "Property_Name"]
+top_properties_cal <- head(ordered_props_cal, 10)
+
+# Filter the original dataframe for the selected top properties and both _cal and _val data
+mdl.stats_top <- mdl.stats_filtered[mdl.stats_filtered$Property_Name %in% top_properties_cal, ]
+
+# Create a new factor variable to control the order of bars
+mdl.stats_top$Property_Name <- factor(mdl.stats_top$Property_Name, levels = top_properties_cal)
+
+# Plotting
+cal_val_top_plot <- ggplot(mdl.stats_top, aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  labs(title = "Top Properties with Highest R2 for _cal and _val Data_Types",
+       x = "Property",
+       y = "R2") +
+  theme_minimal()
+
+# Save the plot
+ggsave(paste0(getwd(), "/cal_val_RF_MIR", ".png"),
+       plot = cal_val_top_plot,
+       width = 8,
+       height = 6, 
+       units = "in",
+       dpi = 300)
+```
+
+### Grouping Reference Data
+
+Grouping reference data by temperature
+
+```{r}
+
+#Recalling df.f since it's been overidden
+
+df.f<-df.f_master
+#Creating a new column 
+
+# df.f<-df.f %>%
+#   dplyr::mutate(Temp_factor = case_when(Temp.>=200 & Temp.<300 ~ 2,
+#                                   Temp.>=300 & Temp.<400 ~ 3,
+#                                   Temp.>=400 & Temp.<500 ~ 4,
+#                                   Temp.>=500 & Temp.<600 ~ 5,
+#                                   Temp.>=600 & Temp.<1000 ~ 6))
+
+#first attempt with only two factor types
+
+df.f<-df.f %>%
+  dplyr::mutate(Temp_factor = case_when(Temp.>=200 & Temp.<400 ~ 1,
+                                        Temp.>=400 & Temp.<=550 ~ 2,
+                                  Temp.>550 & Temp.<1000 ~ 3))
+
+
+df.f$Temp_factor<-as.factor(df.f$Temp_factor)
+##
+
+df.f<-df.f %>%
+  dplyr::mutate(H_C_factor = case_when(Htot_to_Ctot_.molar.>=0 & Htot_to_Ctot_.molar.<=0.5 ~ 1,
+                                       Htot_to_Ctot_.molar.>0.5 & Htot_to_Ctot_.molar.<=2.0 ~ 2))
+
+df.f<-df.f %>%
+  dplyr::mutate(Ash_factor = case_when(Ash_avg>=0 & Ash_avg<=0.45 ~ 1,
+                                       Ash_avg>0.45 & Ash_avg<=1.0 ~ 2))
+
+df.f<-df.f %>%
+  dplyr::mutate(O_C_factor = case_when(Oult_to_Ctot_.molar.>=0 & Oult_to_Ctot_.molar.<=0.25 ~ 1,
+  
+                                       Oult_to_Ctot_.molar.>=0.25 & Oult_to_Ctot_.molar.<=0.45 ~ 2,
+                                       Oult_to_Ctot_.molar.>0.45 & Oult_to_Ctot_.molar.<=1.5 ~ 3))
+
+
+df.f$Temp_factor<-as.factor(df.f$Temp_factor)
+df.f$H_C_factor<-as.factor(df.f$H_C_factor)
+df.f$Ash_factor<-as.factor(df.f$Ash_factor)
+df.f$O_C_factor<-as.factor(df.f$O_C_factor)
+df.f$Temp.<-as.numeric(df.f$Temp.)
+#Need to consider including NA as a level (mutate doesn't do it)
+
+df.f_split_Temp<-split(df.f,df.f$Temp_factor)
+df.f_split_H_C<-split(df.f,df.f$H_C_factor)
+df.f_split_Ash<-split(df.f,df.f$Ash_factor)
+df.f_split_O_C<-split(df.f,df.f$O_C_factor)
+
+df.f_H_C_1<-df.f_split_H_C[["1"]]
+df.f_H_C_2<-df.f_split_H_C[["2"]]
+
+df.f_Ash_1<-df.f_split_Ash[["1"]]
+df.f_Ash_2<-df.f_split_Ash[["2"]]
+```
+
+## PCA with Reference Data for Grouping
+
+```{r}
+
+ #Merging spectral (spec_trt) used for PCA earlier with ref data (df.f)
+
+#removed samples with Temp = 950 
+
+spec_ref1 <- merge(df.f,spec_trt)
+
+spec_refA<-spec_ref1%>% filter(is.na(Temp.)|Temp.!=950)
+
+
+#removing the ref data for the PCA
+x<-as.numeric(ncol(df.f))
+
+pcs1 <- prcomp(spec_refA[,-c(1:x)])
+
+#?extracting the first 10 components?
+pcss1 <- pcs1$x[,1:10]
+
+pcss1[1:6,]
+
+plot(pcss1)
+
+```
+
+```{r}
+g <- ggbiplot::ggbiplot(pcs1, #need to specify which library the command is coming from, gives errors otherwise
+              obs.scale = 1,
+              var.scale = 1 ,
+              groups = spec_refA$Temp.,
+              #ellipse = TRUE,
+              ##circle = TRUE,
+              #ellipse.prob = 0.68,
+              var.axes=FALSE)
+
+g<-g + scale_fill_discrete(name="Temp")
+   #  + guides(color=guide_legend("Temp."))
+g
+
+```
+
+### PCA with Temperature Factor
+
+```{r}
+
+g1 <- ggbiplot::ggbiplot(pcs1, #need to specify which library the command is coming from, gives errors otherwise
+              obs.scale = 1,
+              var.scale = 1 ,
+              groups = spec_refA$Temp_factor,
+              #ellipse = TRUE,
+              #circle = TRUE,
+              #ellipse.prob = 0.68,
+              var.axes=FALSE) 
+
+g1<- g1 + labs(title = "PCA plot with Temp Factor") +
+  theme_minimal() + 
+  #theme_void() +  # This removes both grid and background
+  theme(panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 2),
+                                    plot.title = element_text(hjust = 0.5))+
+  guides(color=guide_legend("Temperature Range (C)")) + 
+  scale_color_manual(labels = c("200-400","400-550","550+","NA"), values=c("brown","red","orange","green")) 
+g1
+```
+
+### PCA with H:C Factor
+
+```{r}
+
+plot_pca_HC <- ggbiplot::ggbiplot(pcs1, #need to specify which library the command is coming from, gives errors otherwise
+              obs.scale = 1,
+              var.scale = 1 ,
+              groups = spec_refA$H_C_factor,
+              #ellipse = TRUE,
+              ##circle = TRUE,
+              #ellipse.prob = 0.68,
+              var.axes=FALSE) 
+
+
+plot_pca_HC<- plot_pca_HC + labs(title = "PCA plot with HC Factor") +
+  theme_minimal() +
+  theme(panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 2),
+                                    plot.title = element_text(hjust = 0.5))+
+  guides(color=guide_legend("H:C Range")) + 
+  scale_color_manual(labels = c("0-0.5",">0.5"), values=c("orange","green")) 
+plot_pca_HC
+```
+
+### PCA with Ash Factor
+
+```{r}
+
+plot_pca_Ash <- ggbiplot::ggbiplot(pcs1, #need to specify which library the command is coming from, gives errors otherwise
+              obs.scale = 1,
+              var.scale = 1 ,
+              groups = spec_refA$Ash_factor,
+              #ellipse = TRUE,
+              ##circle = TRUE,
+              #ellipse.prob = 0.68,
+              var.axes=FALSE) 
+
+
+plot_pca_Ash<- plot_pca_Ash + labs(title = "PCA plot with Ash Factor") +
+  theme_minimal() +
+  theme(panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 2),
+                                    plot.title = element_text(hjust = 0.5))+
+  guides(color=guide_legend("Ash Range")) + 
+  scale_color_manual(labels = c("0-0.45","0.45-1"), values=c("purple","gold")) 
+plot_pca_Ash
+```
+
+### PCA with O:C Factor
+
+```{r}
+
+plot_pca_O_C <- ggbiplot::ggbiplot(pcs1, #need to specify which library the command is coming from, gives errors otherwise
+              obs.scale = 1,
+              var.scale = 1 ,
+              groups = spec_refA$O_C_factor,
+              #ellipse = TRUE,
+              ##circle = TRUE,
+              #ellipse.prob = 0.68,
+              var.axes=FALSE) 
+
+
+plot_pca_O_C <- plot_pca_O_C  + labs(title = "PCA plot with O:C Factor") +
+  theme_minimal() +
+  theme(panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 2),
+                                    plot.title = element_text(hjust = 0.5))+
+  guides(color=guide_legend("O:C Range")) + 
+  scale_color_manual(labels = c("0-0.15","0.15-0.45",">0.45"), values=c("peru","pink","green")) 
+plot_pca_O_C
+```
+
+## PLSR per HC (1)
+
+```{r}
+
+
+#select only the common Biochar samples in spectral and wet chemie data based on the fact that this data is subsetted
+
+df.f <- df.f_H_C_1[, !colnames(df.f_H_C_1) %in% c("Temp_factor", "H_C_factor","Ash_factor","O_C_factor")]
+
+
+names(df.f)
+slprptr<-names(df.f[-c(2:4)]) #FUSI EDIT: removing metadata columns
+
+pred<-as.data.frame(spec_trt[,1])
+colnames(pred)<-"SSN"
+
+mdl.stats<-NULL#Model stats container
+
+#FUSI EDIT: started at 3, instead of 2 because the first column in the char type
+for(p in 23:length(slprptr)){
+
+#Select properties to predict one at a time and remove NAs  
+df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
+
+
+#Plot and print Biochar properties boxplots
+boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
+dir.create("Plots_Boxplots_PLSR_MIR_HC1")
+png(paste0(getwd(),"/Plots_Boxplots_PLSR_MIR_HC1/",slprptr[p],".png"))
+print(boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = ""))
+dev.off()
+
+# #Split samples inside loop for variables with many NAs
+# #Set splitting proportion for the calibration and validation data
+set.seed(123)
+pool=df.f[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
+pool<-pool[order(pool$SSN),]
+poolid<-pool$SSN
+
+#Get calibration and validation datasets
+val_df<-pool
+cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+
+# threshold to exclude the extreme 5% values
+#KARARI UPDATE; 95% loses too many samples, changed to 99% 
+
+cal_df <-subset(cal_df1, cal_df1[,2]>quantile(cal_df1[,2], 0.01)&cal_df1[,2] <quantile(cal_df1[,2], 0.99))
+val_df1 <-subset(df.sel, (df.sel$SSN %in% val_df$SSN))
+val_df <-subset(val_df1, val_df1[,2]>quantile(val_df1[,2], 0.01)&val_df1[,2] <quantile(val_df1[,2], 0.99))
+#FUSI EDIT: first chunk is initial code - for some reason wasn't actually orering the dataframe. second chunk is my edit
+#renames the non-working version with suffice _or
+val_df_or<-val_df[order(rownames(val_df)),]
+cal_df_or<-cal_df[order(rownames(cal_df)),]
+
+val_df<-setorder(val_df)
+cal_df<-setorder(cal_df)
+
+ # Check if val_df is empty
+  if (nrow(val_df) > 0) { 
+
+#Subset pre-treated spectra by available reference data
+val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
+cal_spec<-spec_trt[is.element(spec_trt$SSN, cal_df$SSN),]
+cal_spec<-cal_spec[order(cal_spec$SSN),]
+val_spec<-val_spec[order(val_spec$SSN),]
+
+
+#Get no of calibration and validation datasets
+N_cal<-nrow(cal_spec)
+N_val<-nrow(val_spec)
+
+#Model data
+Xcal.f=cal_spec[,-1]
+Xval.f=val_spec[,-1]
+dfcal.f=cal_df[,-1]
+dfval.f=val_df[,-1]
+
+###### PLSR SOC
+maxc <- 10  ## number of max components
+#FUSI EDIT: max was 25
+pls.md <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp=maxc, validation = "CV", segments = 10)#10-fold CV
+#Each iteration of the cross-validation process involves training the model on 9 of the 10 segments and testing it on the remaining segment, repeating this process 10 times to ensure each segment is used as a test set once.
+
+## plot RMSEP vs. number of components
+plot(pls.md, "val", main=slprptr[p]) 
+
+dir.create("Components_plots_PLSR_MIR_HC1")
+png(paste0(getwd(),"/Components_plots_PLSR_MIR_HC1/",slprptr[p],".png"))
+print(plot(pls.md, "val", main=slprptr[p]))
+dev.off()
+
+## no. components to use, the one with the smallest adj RMSEP value
+RMSEP.obj<-RMSEP(pls.md)
+str(RMSEP.obj)
+
+RMSEP.obj$val[1:2,1,]
+nc <- as.numeric(sub("comps", "", names(which.min(RMSEP.obj$val[1,1,2:dim(RMSEP.obj$val[1:2,1,])[2]]))))
+nc
+
+#Generate relevant model name
+md.nm<-paste0("pls.md.", slprptr[p], ".nc", nc)
+
+#Rename model with the looped Biochar property
+assign(x = md.nm, value = get("pls.md", pos = .GlobalEnv), pos = .GlobalEnv)
+
+## predict to validation dataset
+pls.prd <- predict(pls.md, ncomp = nc, newdata = Xval.f)
+
+## Return prediction statistics
+val.stats=round(goof(dfval.f, pls.prd, type = "spec"),3)
+val.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_val"), Comps="", N=N_val, val.stats)
+val.stats
+
+## calibration statistics
+pls.pc <- predict(pls.md, ncomp = nc, newdata = Xcal.f)
+
+pls.cal=round(goof(dfcal.f, pls.pc, type = "spec"),3)
+cal.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_cal"), Comps=as.character(nc), N=N_cal, pls.cal)
+cal.stats
+
+################### Get model statistics #########################
+mdstats<-bind_rows(cal.stats, val.stats)
+
+#Create model stats labels for the plot
+#FUSI EDIT: Removed comps from before N because plot was crowded should add back in and only remove in plot below 
+slct.stats<-as.data.frame(t(mdstats[,c("Property","N","R2","RMSE","bias","RPIQ" )])) 
+names(slct.stats)<-NULL
+slct.stats<-bind_cols(rownames(slct.stats),slct.stats[,2])
+
+#FUSI EDIT: added "comps" because it is in slct.stats 
+valbls<-paste0(c("N","R2","RMSE","bias","RPIQ"), "\n")
+valsts<-paste0(c(slct.stats[2,2],slct.stats[3,2],slct.stats[4,2],slct.stats[5,2],slct.stats[6,2]))
+valstats<-paste(valbls,valsts)
+
+#Bind all looped properties model stats
+mdl.stats<-bind_rows(mdl.stats,mdstats)
+
+
+lgth<-length(sort(dfval.f,decreasing=F))
+
+seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)
+
+#Plot validation plot
+plot(dfval.f,pls.prd,pch=10,
+     xlab=paste('Measured',names(val_df)[2],sep="_"),
+     ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+     xlim = range(c(dfval.f,pls.prd)),
+     ylim = range(c(dfval.f,pls.prd)),
+     mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+     )   ## plot the predicted vs. measured in the validation
+abline(a = 0, b = 1)
+
+
+dir.create("Plots_Validationplots_PLSR_MIR_HC1")
+png(paste0(getwd(),"/Plots_Validationplots_PLSR_MIR_HC1/",slprptr[p],".png"))
+print(plot(dfval.f,pls.prd,pch=10,
+           xlab=paste('Measured',names(val_df)[2],sep="_"),
+           ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+           xlim = range(c(dfval.f,pls.prd)),
+           ylim = range(c(dfval.f,pls.prd)),
+           mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+           ))
+abline(a = 0, b = 1)
+dev.off()
+
+
+################### Predict all samples #########################
+prd.smpls <- predict(pls.md, spec_trt[,-1])
+
+prd<-as.data.frame(prd.smpls)
+df.prd<-bind_cols(SSN=rownames(prd),prd[,nc])
+colnames(df.prd)<-c("SSN",slprptr[p])
+
+pred<-merge(pred, df.prd, by="SSN", all.x = T)
+
+  } else {
+    print(paste("Skipping testing parameter:", slprptr[p], "because val_df is empty."))
+  }
+
+
+}
+#FUSI EDIT: End of for loop
+
+
+#Remove the least reliably predicted texture data (Clay,Sand or Silt)
+#Recalculate the removed texture data to make Clay+Sand+Silt=100% content
+
+
+```
+
+```{r}
+
+# Add two new columns based on whether the Property contains "_val" or "_cal"
+mdl.stats_PLSR_MIR_HC1 <- mdl.stats %>%
+  mutate(Property_Name = gsub("(_cal|_val).*", "", Property),
+         Data_Type = ifelse(grepl("_val", Property), "_val", "_cal"))
+
+#Write model statistics and predicted values to the local drive
+write.csv(mdl.stats_PLSR_MIR_HC1, paste0(getwd(),"/Model_Statistics_PLSR_MIR_HC1.csv"),row.names = F)
+write.csv(pred, paste0(getwd(),"/Predicted_Biochar_Properties_PLSR_MIR_HC1.csv"),row.names = F)
+getwd()
+
+# Filter out rows with missing R2 values
+mdl.stats_filtered <- mdl.stats_PLSR_MIR_HC2[complete.cases(mdl.stats_PLSR_MIR_HC1$R2), ]
+
+# Order the properties based on R2 values in descending order for _cal data
+ordered_props_cal <- mdl.stats_filtered[mdl.stats_filtered$Data_Type == "_cal", ]
+ordered_props_cal <- ordered_props_cal[order(-ordered_props_cal$R2), "Property_Name"]
+top_properties_cal <- head(ordered_props_cal, 10)
+
+# Filter the original dataframe for the selected top properties and both _cal and _val data
+mdl.stats_top <- mdl.stats_filtered[mdl.stats_filtered$Property_Name %in% top_properties_cal, ]
+
+# Create a new factor variable to control the order of bars
+mdl.stats_top$Property_Name <- factor(mdl.stats_top$Property_Name, levels = top_properties_cal)
+
+# Plotting
+cal_val_top_plot <- ggplot(mdl.stats_top, aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  labs(title = "Top Properties with Highest R2 for _cal and _val Data_Types",
+       x = "Property",
+       y = "R2") +
+  theme_minimal()
+
+# Save the plot
+ggsave(paste0(getwd(), "/cal_val_PLSR_MIR_HC1", ".png"),
+       plot = cal_val_top_plot,
+       width = 8,
+       height = 6, 
+       units = "in",
+       dpi = 300)
+```
+
+## PLSR per HC (2)
+
+```{r}
+
+
+
+#select only the common Biochar samples in spectral and wet chemie data
+#df.f_HC<-df.f_H_C_1[is.element(df.f_H_C_2$SSN, spec_trt$SSN),]
+
+df.f <- df.f_H_C_2[, !colnames(df.f_H_C_2) %in% c("Temp_factor", "H_C_factor","Ash_factor","O_C_factor")]
+
+
+names(df.f)
+slprptr<-names(df.f[-c(2:4)]) #FUSI EDIT: removing metadata columns
+
+pred<-as.data.frame(spec_trt[,1])
+colnames(pred)<-"SSN"
+
+mdl.stats<-NULL#Model stats container
+
+#FUSI EDIT: started at 3, instead of 2 because the first column in the char type
+for(p in 23:length(slprptr)){
+
+#Select properties to predict one at a time and remove NAs  
+df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
+
+
+#Plot and print Biochar properties boxplots
+boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
+dir.create("Plots_Boxplots_PLSR_MIR_HC2")
+png(paste0(getwd(),"/Plots_Boxplots_PLSR_MIR_HC2/",slprptr[p],".png"))
+print(boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = ""))
+dev.off()
+
+# #Split samples inside loop for variables with many NAs
+# #Set splitting proportion for the calibration and validation data
+set.seed(123)
+pool=df.f[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
+pool<-pool[order(pool$SSN),]
+poolid<-pool$SSN
+
+#Get calibration and validation datasets
+val_df<-pool
+cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+
+# threshold to exclude the extreme 5% values
+#KARARI UPDATE; 95% loses too many samples, changed to 99% 
+
+cal_df <-subset(cal_df1, cal_df1[,2]>quantile(cal_df1[,2], 0.01)&cal_df1[,2] <quantile(cal_df1[,2], 0.99))
+val_df1 <-subset(df.sel, (df.sel$SSN %in% val_df$SSN))
+val_df <-subset(val_df1, val_df1[,2]>quantile(val_df1[,2], 0.01)&val_df1[,2] <quantile(val_df1[,2], 0.99))
+#FUSI EDIT: first chunk is initial code - for some reason wasn't actually orering the dataframe. second chunk is my edit
+#renames the non-working version with suffice _or
+val_df_or<-val_df[order(rownames(val_df)),]
+cal_df_or<-cal_df[order(rownames(cal_df)),]
+
+val_df<-setorder(val_df)
+cal_df<-setorder(cal_df)
+
+ # Check if val_df is empty
+  if (nrow(val_df) > 0) { 
+    
+#Subset pre-treated spectra by available reference data
+val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
+cal_spec<-spec_trt[is.element(spec_trt$SSN, cal_df$SSN),]
+cal_spec<-cal_spec[order(cal_spec$SSN),]
+val_spec<-val_spec[order(val_spec$SSN),]
+
+
+#Get no of calibration and validation datasets
+N_cal<-nrow(cal_spec)
+N_val<-nrow(val_spec)
+
+#Model data
+Xcal.f=cal_spec[,-1]
+Xval.f=val_spec[,-1]
+dfcal.f=cal_df[,-1]
+dfval.f=val_df[,-1]
+
+###### PLSR SOC
+maxc <- 5  ## number of max components
+#FUSI EDIT: max was 25
+pls.md <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp=maxc, validation = "CV", segments = 8)#10-fold CV
+#Each iteration of the cross-validation process involves training the model on 9 of the 10 segments and testing it on the remaining segment, repeating this process 10 times to ensure each segment is used as a test set once.
+
+## plot RMSEP vs. number of components
+plot(pls.md, "val", main=slprptr[p]) 
+
+dir.create("Components_plots_PLSR_MIR_HC2")
+png(paste0(getwd(),"/Components_plots_PLSR_MIR_HC2/",slprptr[p],".png"))
+print(plot(pls.md, "val", main=slprptr[p]))
+dev.off()
+
+## no. components to use, the one with the smallest adj RMSEP value
+RMSEP.obj<-RMSEP(pls.md)
+str(RMSEP.obj)
+
+RMSEP.obj$val[1:2,1,]
+nc <- as.numeric(sub("comps", "", names(which.min(RMSEP.obj$val[1,1,2:dim(RMSEP.obj$val[1:2,1,])[2]]))))
+nc
+
+#Generate relevant model name
+md.nm<-paste0("pls.md.", slprptr[p], ".nc", nc)
+
+#Rename model with the looped Biochar property
+assign(x = md.nm, value = get("pls.md", pos = .GlobalEnv), pos = .GlobalEnv)
+
+## predict to validation dataset
+pls.prd <- predict(pls.md, ncomp = nc, newdata = Xval.f)
+
+## Return prediction statistics
+val.stats=round(goof(dfval.f, pls.prd, type = "spec"),3)
+val.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_val"), Comps="", N=N_val, val.stats)
+val.stats
+
+## calibration statistics
+pls.pc <- predict(pls.md, ncomp = nc, newdata = Xcal.f)
+
+pls.cal=round(goof(dfcal.f, pls.pc, type = "spec"),3)
+cal.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_cal"), Comps=as.character(nc), N=N_cal, pls.cal)
+cal.stats
+
+################### Get model statistics #########################
+mdstats<-bind_rows(cal.stats, val.stats)
+
+#Create model stats labels for the plot
+#FUSI EDIT: Removed comps from before N because plot was crowded should add back in and only remove in plot below 
+slct.stats<-as.data.frame(t(mdstats[,c("Property","N","R2","RMSE","bias","RPIQ" )])) 
+names(slct.stats)<-NULL
+slct.stats<-bind_cols(rownames(slct.stats),slct.stats[,2])
+
+#FUSI EDIT: added "comps" because it is in slct.stats 
+valbls<-paste0(c("N","R2","RMSE","bias","RPIQ"), "\n")
+valsts<-paste0(c(slct.stats[2,2],slct.stats[3,2],slct.stats[4,2],slct.stats[5,2],slct.stats[6,2]))
+valstats<-paste(valbls,valsts)
+
+#Bind all looped properties model stats
+mdl.stats<-bind_rows(mdl.stats,mdstats)
+
+
+lgth<-length(sort(dfval.f,decreasing=F))
+
+seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)
+
+#Plot validation plot
+plot(dfval.f,pls.prd,pch=10,
+     xlab=paste('Measured',names(val_df)[2],sep="_"),
+     ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+     xlim = range(c(dfval.f,pls.prd)),
+     ylim = range(c(dfval.f,pls.prd)),
+     mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+     )   ## plot the predicted vs. measured in the validation
+abline(a = 0, b = 1)
+
+
+dir.create("Plots_Validationplots_PLSR_MIR_HC2")
+png(paste0(getwd(),"/Plots_Validationplots_PLSR_MIR_HC2/",slprptr[p],".png"))
+print(plot(dfval.f,pls.prd,pch=10,
+           xlab=paste('Measured',names(val_df)[2],sep="_"),
+           ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+           xlim = range(c(dfval.f,pls.prd)),
+           ylim = range(c(dfval.f,pls.prd)),
+           mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+           ))
+abline(a = 0, b = 1)
+dev.off()
+
+
+################### Predict all samples #########################
+
+
+    
+    prd.smpls <- predict(pls.md, spec_trt[,-1])
+    prd<-as.data.frame(prd.smpls)
+    df.prd<-bind_cols(SSN=rownames(prd),prd[,nc])
+    colnames(df.prd)<-c("SSN",slprptr[p])
+    
+    pred<-merge(pred, df.prd, by="SSN", all.x = T)
+    
+  } else {
+    print(paste("Skipping testing parameter:", slprptr[p], "because val_df is empty."))
+  }
+
+}
+#FUSI EDIT: End of for loop
+
+
+
+```
+
+```{r}
+
+# Add two new columns based on whether the Property contains "_val" or "_cal"
+mdl.stats_PLSR_MIR_HC2 <- mdl.stats %>%
+  mutate(Property_Name = gsub("(_cal|_val).*", "", Property),
+         Data_Type = ifelse(grepl("_val", Property), "_val", "_cal"))
+
+#Write model statistics and predicted values to the local drive
+write.csv(mdl.stats_PLSR_MIR_HC2, paste0(getwd(),"/Model_Statistics_PLSR_MIR_HC2.csv"),row.names = F)
+write.csv(pred, paste0(getwd(),"/Predicted_Biochar_Properties_PLSR_MIR_HC2.csv"),row.names = F)
+getwd()
+
+# Filter out rows with missing R2 values
+mdl.stats_filtered <- mdl.stats_PLSR_MIR_HC2[complete.cases(mdl.stats_PLSR_MIR_HC2$R2), ]
+
+# Order the properties based on R2 values in descending order for _cal data
+ordered_props_cal <- mdl.stats_filtered[mdl.stats_filtered$Data_Type == "_cal", ]
+ordered_props_cal <- ordered_props_cal[order(-ordered_props_cal$R2), "Property_Name"]
+top_properties_cal <- head(ordered_props_cal, 10)
+
+# Filter the original dataframe for the selected top properties and both _cal and _val data
+mdl.stats_top <- mdl.stats_filtered[mdl.stats_filtered$Property_Name %in% top_properties_cal, ]
+
+# Create a new factor variable to control the order of bars
+mdl.stats_top$Property_Name <- factor(mdl.stats_top$Property_Name, levels = top_properties_cal)
+
+# Plotting
+cal_val_top_plot <- ggplot(mdl.stats_top, aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  labs(title = "Top Properties with Highest R2 for _cal and _val Data_Types",
+       x = "Property",
+       y = "R2") +
+  theme_minimal()
+
+# Save the plot
+ggsave(paste0(getwd(), "/cal_val_PLSR_MIR_HC2", ".png"),
+       plot = cal_val_top_plot,
+       width = 8,
+       height = 6, 
+       units = "in",
+       dpi = 300)
+
+```
+
+## PLSR by Ash 1
+
+```{r}
+
+#select only the common Biochar samples in spectral and wet chemie data based on the fact that this data is subsetted
+
+df.f <- df.f_Ash_1[, !colnames(df.f_Ash_1) %in% c("Temp_factor", "H_C_factor","Ash_factor","O_C_factor")]
+
+
+names(df.f)
+slprptr<-names(df.f[-c(2:4)]) #FUSI EDIT: removing metadata columns
+
+pred<-as.data.frame(spec_trt[,1])
+colnames(pred)<-"SSN"
+
+mdl.stats<-NULL#Model stats container
+
+#FUSI EDIT: started at 3, instead of 2 because the first column in the char type
+for(p in 23:length(slprptr)){
+
+#Select properties to predict one at a time and remove NAs  
+df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
+
+
+#Plot and print Biochar properties boxplots
+boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
+dir.create("Plots_Boxplots_PLSR_MIR_Ash1")
+png(paste0(getwd(),"/Plots_Boxplots_PLSR_MIR_Ash1/",slprptr[p],".png"))
+print(boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = ""))
+dev.off()
+
+# #Split samples inside loop for variables with many NAs
+# #Set splitting proportion for the calibration and validation data
+set.seed(123)
+pool=df.f[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
+pool<-pool[order(pool$SSN),]
+poolid<-pool$SSN
+
+#Get calibration and validation datasets
+val_df<-pool
+cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+
+# threshold to exclude the extreme 5% values
+#KARARI UPDATE; 95% loses too many samples, changed to 99% 
+
+cal_df <-subset(cal_df1, cal_df1[,2]>quantile(cal_df1[,2], 0.01)&cal_df1[,2] <quantile(cal_df1[,2], 0.99))
+val_df1 <-subset(df.sel, (df.sel$SSN %in% val_df$SSN))
+val_df <-subset(val_df1, val_df1[,2]>quantile(val_df1[,2], 0.01)&val_df1[,2] <quantile(val_df1[,2], 0.99))
+#FUSI EDIT: first chunk is initial code - for some reason wasn't actually orering the dataframe. second chunk is my edit
+#renames the non-working version with suffice _or
+val_df_or<-val_df[order(rownames(val_df)),]
+cal_df_or<-cal_df[order(rownames(cal_df)),]
+
+val_df<-setorder(val_df)
+cal_df<-setorder(cal_df)
+
+ # Check if val_df is empty
+  if (nrow(val_df) > 0) { 
+
+#Subset pre-treated spectra by available reference data
+val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
+cal_spec<-spec_trt[is.element(spec_trt$SSN, cal_df$SSN),]
+cal_spec<-cal_spec[order(cal_spec$SSN),]
+val_spec<-val_spec[order(val_spec$SSN),]
+
+
+#Get no of calibration and validation datasets
+N_cal<-nrow(cal_spec)
+N_val<-nrow(val_spec)
+
+#Model data
+Xcal.f=cal_spec[,-1]
+Xval.f=val_spec[,-1]
+dfcal.f=cal_df[,-1]
+dfval.f=val_df[,-1]
+
+###### PLSR SOC
+maxc <- 10  ## number of max components
+#FUSI EDIT: max was 25
+pls.md <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp=maxc, validation = "CV", segments = 10)#10-fold CV
+#Each iteration of the cross-validation process involves training the model on 9 of the 10 segments and testing it on the remaining segment, repeating this process 10 times to ensure each segment is used as a test set once.
+
+## plot RMSEP vs. number of components
+plot(pls.md, "val", main=slprptr[p]) 
+
+dir.create("Components_plots_PLSR_MIR_Ash1")
+png(paste0(getwd(),"/Components_plots_PLSR_MIR_Ash1/",slprptr[p],".png"))
+print(plot(pls.md, "val", main=slprptr[p]))
+dev.off()
+
+## no. components to use, the one with the smallest adj RMSEP value
+RMSEP.obj<-RMSEP(pls.md)
+str(RMSEP.obj)
+
+RMSEP.obj$val[1:2,1,]
+nc <- as.numeric(sub("comps", "", names(which.min(RMSEP.obj$val[1,1,2:dim(RMSEP.obj$val[1:2,1,])[2]]))))
+nc
+
+#Generate relevant model name
+md.nm<-paste0("pls.md.", slprptr[p], ".nc", nc)
+
+#Rename model with the looped Biochar property
+assign(x = md.nm, value = get("pls.md", pos = .GlobalEnv), pos = .GlobalEnv)
+
+## predict to validation dataset
+pls.prd <- predict(pls.md, ncomp = nc, newdata = Xval.f)
+
+## Return prediction statistics
+val.stats=round(goof(dfval.f, pls.prd, type = "spec"),3)
+val.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_val"), Comps="", N=N_val, val.stats)
+val.stats
+
+## calibration statistics
+pls.pc <- predict(pls.md, ncomp = nc, newdata = Xcal.f)
+
+pls.cal=round(goof(dfcal.f, pls.pc, type = "spec"),3)
+cal.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_cal"), Comps=as.character(nc), N=N_cal, pls.cal)
+cal.stats
+
+################### Get model statistics #########################
+mdstats<-bind_rows(cal.stats, val.stats)
+
+#Create model stats labels for the plot
+#FUSI EDIT: Removed comps from before N because plot was crowded should add back in and only remove in plot below 
+slct.stats<-as.data.frame(t(mdstats[,c("Property","N","R2","RMSE","bias","RPIQ" )])) 
+names(slct.stats)<-NULL
+slct.stats<-bind_cols(rownames(slct.stats),slct.stats[,2])
+
+#FUSI EDIT: added "comps" because it is in slct.stats 
+valbls<-paste0(c("N","R2","RMSE","bias","RPIQ"), "\n")
+valsts<-paste0(c(slct.stats[2,2],slct.stats[3,2],slct.stats[4,2],slct.stats[5,2],slct.stats[6,2]))
+valstats<-paste(valbls,valsts)
+
+#Bind all looped properties model stats
+mdl.stats<-bind_rows(mdl.stats,mdstats)
+
+
+lgth<-length(sort(dfval.f,decreasing=F))
+
+seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)
+
+#Plot validation plot
+plot(dfval.f,pls.prd,pch=10,
+     xlab=paste('Measured',names(val_df)[2],sep="_"),
+     ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+     xlim = range(c(dfval.f,pls.prd)),
+     ylim = range(c(dfval.f,pls.prd)),
+     mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+     )   ## plot the predicted vs. measured in the validation
+abline(a = 0, b = 1)
+
+
+dir.create("Plots_Validationplots_PLSR_MIR_Ash1")
+png(paste0(getwd(),"/Plots_Validationplots_PLSR_MIR_Ash1/",slprptr[p],".png"))
+print(plot(dfval.f,pls.prd,pch=10,
+           xlab=paste('Measured',names(val_df)[2],sep="_"),
+           ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+           xlim = range(c(dfval.f,pls.prd)),
+           ylim = range(c(dfval.f,pls.prd)),
+           mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+           ))
+abline(a = 0, b = 1)
+dev.off()
+
+
+################### Predict all samples #########################
+prd.smpls <- predict(pls.md, spec_trt[,-1])
+
+prd<-as.data.frame(prd.smpls)
+df.prd<-bind_cols(SSN=rownames(prd),prd[,nc])
+colnames(df.prd)<-c("SSN",slprptr[p])
+
+pred<-merge(pred, df.prd, by="SSN", all.x = T)
+
+  } else {
+    print(paste("Skipping testing parameter:", slprptr[p], "because val_df is empty."))
+  }
+
+}
+#FUSI EDIT: End of for loop
+
+
+#Remove the least reliably predicted texture data (Clay,Sand or Silt)
+#Recalculate the removed texture data to make Clay+Sand+Silt=100% content
+
+# Add two new columns based on whether the Property contains "_val" or "_cal"
+mdl.stats <- mdl.stats %>%
+  mutate(Property_Name = gsub("(_cal|_val).*", "", Property),
+         Data_Type = ifelse(grepl("_val", Property), "_val", "_cal"))
+
+#Write model statistics and predicted values to the local drive
+write.csv(mdl.stats, paste0(getwd(),"/Model_Statistics_PLSR_MIR_Ash1.csv"),row.names = F)
+write.csv(pred, paste0(getwd(),"/Predicted_Biochar_Properties_PLSR_MIR_Ash1.csv"),row.names = F)
+getwd()
+
+```
+
+```{r}
+
+
+# Add two new columns based on whether the Property contains "_val" or "_cal"
+mdl.stats_PLSR_MIR_Ash1 <- mdl.stats %>%
+  mutate(Property_Name = gsub("(_cal|_val).*", "", Property),
+         Data_Type = ifelse(grepl("_val", Property), "_val", "_cal"))
+
+#Write model statistics and predicted values to the local drive
+write.csv(mdl.stats_RF_MIR, paste0(getwd(),"/Model_Statistics_PLSR_MIR_Ash1.csv"),row.names = F)
+write.csv(pred, paste0(getwd(),"/Predicted_Biochar_Properties_PLSR_MIR_Ash1.csv"),row.names = F)
+getwd()
+
+# Filter out rows with missing R2 values
+mdl.stats_filtered <- mdl.stats_RF_MIR[complete.cases(mdl.stats_PLSR_MIR_Ash1$R2), ]
+
+# Order the properties based on R2 values in descending order for _cal data
+ordered_props_cal <- mdl.stats_filtered[mdl.stats_filtered$Data_Type == "_cal", ]
+ordered_props_cal <- ordered_props_cal[order(-ordered_props_cal$R2), "Property_Name"]
+top_properties_cal <- head(ordered_props_cal, 10)
+
+# Filter the original dataframe for the selected top properties and both _cal and _val data
+mdl.stats_top <- mdl.stats_filtered[mdl.stats_filtered$Property_Name %in% top_properties_cal, ]
+
+# Create a new factor variable to control the order of bars
+mdl.stats_top$Property_Name <- factor(mdl.stats_top$Property_Name, levels = top_properties_cal)
+
+# Plotting
+cal_val_top_plot <- ggplot(mdl.stats_top, aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  labs(title = "Top Properties with Highest R2 for _cal and _val Data_Types",
+       x = "Property",
+       y = "R2") +
+  theme_minimal()
+
+# Save the plot
+ggsave(paste0(getwd(), "/cal_val_PLSR_MIR_Ash1", ".png"),
+       plot = cal_val_top_plot,
+       width = 8,
+       height = 6, 
+       units = "in",
+       dpi = 300)
+```
+
+## Correlation Matrices
+
+help from the following [link](http://www.sthda.com/english/wiki/correlation-matrix-a-quick-start-guide-to-analyze-format-and-visualize-a-correlation-matrix-using-r-software)
+
+```{r, message=FALSE}
+library(Hmisc)
+library(PerformanceAnalytics)
+library(gplots)
+library(plotly)
+```
+
+### Hierrchical Clustering
+
+```{r}
+df.f$Temp.<-as.numeric(df.f$Temp.)
+#df.f[,-1]<-as.numeric(unlist((df.f[,-1]))
+cor_mat<-rcorr(as.matrix(df.f[,c(2:ncol(df.f))]))
+cor_mat
+
+
+#Hierrchical Clustering
+cor_mat_data<-df.f[,2:(ncol(df.f)-2)]
+
+cor_mat_2<-cor(cor_mat_data, use = "pairwise.complete.obs")
+#calculates correlations pairwise between variables while excluding observations that have missing values in either of the two variables being correlated
+
+Hierchical_cluster<-heatmap.2(cor_mat_2, 
+          #col = colorRampPalette(c("blue", "white", "red"))(50), 
+          dendrogram = "both",
+          trace = "none",
+          #margins = c(10, 10),
+          main = "Correlation Heatmap")
+Hierchical_cluster
+
+```
+
+### Interactive Heatmap
+
+```{r}
+
+heatmap_interactive <- plot_ly(
+  x = colnames(cor_mat_2),
+  y = colnames(cor_mat_2),
+  z = cor_mat_2,
+  type = "heatmap",
+  colorscale = "Viridis"
+)
+heatmap_interactive
+
+```
+
+```{r}
+
+filtered_cor_mat <- cor_mat_2
+filtered_cor_mat[filtered_cor_mat > -0.75 & filtered_cor_mat <0.75] <- NA
+
+
+#filtered_cor_mat[filtered_cor_mat < 0.75 | filtered_cor_mat > 0.99] <- NA
+
+heatmap_interactive_2 <- plot_ly(
+  x = colnames(filtered_cor_mat),
+  y = colnames(filtered_cor_mat),
+  z = filtered_cor_mat,
+  type = "heatmap",
+  colorscale = "Viridis"
+)
+heatmap_interactive_2
+```
+
+```{r}
+
+df <- data.frame(
+  A = c(1, 2, NA, 4),
+  B = c(NA, 2, 3, 4)
+)
+
+# Remove rows containing NA values
+df_clean <- df[complete.cases(df), ]
+```
+
+```{r, warning=FALSE}
+
+corr_data<-df.f[,c(2:20)]
+chart.Correlation(corr_data)#, histogram=TRUE)
+```
+
+```{r, warning=FALSE}
+
+corr_data_1<-df.f[,c(21:40)]
+chart.Correlation(corr_data_1)#, histogram=TRUE)
+```
+
+```{r, warning=FALSE}
+
+corr_data_2<-df.f[,c(41:ncol(df.f)-2)]
+chart.Correlation(corr_data_2)#, histogram=TRUE)
+```

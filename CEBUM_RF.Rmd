@@ -1,0 +1,280 @@
+---
+title: "RF"
+output: html_document
+date: "2024-02-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(prospectr)
+library (globals)
+library(stringr)
+library(ggplot2)
+library(here)
+```
+
+Load Reference data
+
+```{r}
+
+# spectraldata=read.csv("Raw_spectra-MIR.csv")
+spec_trt <- readRDS("spec_trt_MIR.RDS")
+spec_trt <- spec_trt[,-2] #removing the data for the first wavenumber since it's all NAN's
+
+
+df.f<-readRDS("df.f.RDS")
+
+threshold_na <- 0.85 #for a 85% cut-off
+
+df.f<-
+  df.f %>% select(where(~mean(is.na(.)) < threshold_na))
+
+spectraldata.fin.fin<-spec_trt[is.element(spec_trt$SSN, df.f$SSN),] ## FUSI Still unclear what this is for. Changed to reference spec_trt
+ 
+```
+
+## 
+
+## Random Forest
+
+```{r}
+
+#Available properties to predict
+#Incase you want to predict only selected properties,
+#get property position by running line 66. Remove hash sign between ")" and "["
+#symbols on line 67. Edit properties position and run line 67.
+#Always ensure position 1 in always included.
+
+
+names(df.f)
+slprptr<-names(df.f[-c(2:4)]) #FUSI EDIT: removing metadata columns
+
+pred<-as.data.frame(spec_trt[,1])
+colnames(pred)<-"SSN"
+
+mdl.stats<-NULL#Model stats container
+
+for(p in 23:length(slprptr)){
+  
+#Select properties to predict one at a time and remove NAs  
+df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
+
+#Plot and print Biochar properties boxplots
+boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
+dir.create("Plots_Boxplots_RF_MIR")
+png(paste0(getwd(),"/Plots_Boxplots_RF_MIR/",slprptr[p],".png"))
+print(boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = ""))
+dev.off()
+
+# #Split samples inside loop for variables with many NAs
+# #Set splitting proportion for the calibration and validation data
+set.seed(123)
+pool=df.f[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
+pool<-pool[order(pool$SSN),]
+poolid<-pool$SSN
+
+#Get calibration and validation datasets
+val_df<-pool
+cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+# threshold to exclude the extreme 5% values
+cal_df <-subset(cal_df1, cal_df1[,2]>quantile(cal_df1[,2], 0.05)&cal_df1[,2] <quantile(cal_df1[,2], 0.95))
+val_df1 <-subset(df.sel, (df.sel$SSN %in% val_df$SSN))
+val_df <-subset(val_df1, val_df1[,2]>quantile(val_df1[,2], 0.05)&val_df1[,2] <quantile(val_df1[,2], 0.95))
+
+
+#FUSI EDIT: first chunk is initial code - for some reason wasn't actually orering the dataframe. second chunk is my edit
+#renames the non-working version with suffice _or
+val_df_or<-val_df[order(rownames(val_df)),]
+cal_df_or<-cal_df[order(rownames(cal_df)),]
+
+val_df<-setorder(val_df)
+cal_df<-setorder(cal_df)
+
+
+#Subset pre-treated spectra by available reference data
+val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
+cal_spec<-spec_trt[is.element(spec_trt$SSN, cal_df$SSN),]
+cal_spec<-cal_spec[order(cal_spec$SSN),]
+val_spec<-val_spec[order(val_spec$SSN),]
+
+
+#Get no of calibration and validation datasets
+N_cal<-nrow(cal_spec)
+N_val<-nrow(val_spec)
+
+#Model data
+Xcal.f=cal_spec[,-1]
+Xval.f=val_spec[,-1]
+dfcal.f=cal_df[,-1]
+dfval.f=val_df[,-1]
+
+rf.md <- randomForest(Xcal.f, dfcal.f, ntree=500, mtry=10, importance=TRUE) #500 10
+
+#Generate relevant model name
+md.nm<-paste("rf.md",slprptr[p],sep=".")
+
+#Rename model with the looped Biochar property
+assign(x = md.nm, value = get("rf.md", pos = .GlobalEnv), pos = .GlobalEnv)
+
+## predict to validation dataset
+rf.prd <- predict(rf.md, Xval.f)
+
+
+## Return prediction statistics
+val.stats=round(goof(dfval.f,rf.prd, type = "spec"),3)
+val.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_val"),N=N_val,val.stats)
+val.stats
+## calibration statistics
+rf_pc <- predict(rf.md, Xcal.f)
+rf.cal=round(goof(dfcal.f,rf_pc, type = "spec"),3)
+cal.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_cal"),N=N_cal,rf.cal)
+cal.stats
+
+################### Get model statistics #########################
+mdstats<-bind_rows(cal.stats,val.stats)
+
+#Create model stats labels for the plot
+slct.stats<-as.data.frame(t(mdstats[,c("Property","N","R2","RMSE","bias","RPIQ" )]))
+names(slct.stats)<-NULL
+slct.stats<-bind_cols(rownames(slct.stats),slct.stats[,2])
+valbls<-paste0(c("N","R2","RMSE","bias","RPIQ"), "\n")
+valsts<-paste0(c(slct.stats[2,2],slct.stats[3,2],slct.stats[4,2],slct.stats[5,2],slct.stats[6,2]))
+valstats<-paste(valbls,valsts)
+
+#Bind all looped properties model stats
+mdl.stats<-bind_rows(mdl.stats,mdstats)
+
+
+lgth<-length(sort(dfval.f,decreasing=F))
+
+seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)
+
+#Plot validation plot
+plot(dfval.f,rf.prd,pch=10,
+     xlab=paste('Measured',names(val_df)[2],sep="_"),
+     ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+     xlim = range(c(dfval.f,rf.prd)),
+     ylim = range(c(dfval.f,rf.prd)),
+     mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+     )   ## plot the predicted vs. measured in the validation
+abline(a = 0, b = 1)
+
+
+dir.create("Plots_Validationplots_RF_MIR")
+png(paste0(getwd(),"/Plots_Validationplots_RF_MIR/",slprptr[p],".png"))
+print(plot(dfval.f,rf.prd,pch=10,
+           xlab=paste('Measured',names(val_df)[2],sep="_"),
+           ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+           xlim = range(c(dfval.f,rf.prd)),
+           ylim = range(c(dfval.f,rf.prd)),
+           mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+           ))
+abline(a = 0, b = 1)
+dev.off()
+
+
+################### Predict all samples #########################
+prd.smpls <- predict(rf.md, spec_trt[,-1])
+
+prd<-as.data.frame(prd.smpls)
+df.prd<-bind_cols(SSN=rownames(prd),prd)
+colnames(df.prd)<-c("SSN",slprptr[p])
+
+pred<-merge(pred,df.prd,by="SSN", all.x = T)
+}
+
+#Remove the least reliably predicted texture data (Clay,Sand or Silt)
+#Recalculate the removed texture data to make Clay+Sand+Silt=100% content
+# if(which(colnames(pred) %in% "Silt")>1){
+#   pred<-pred[,-which(colnames(pred) %in% "Silt")]
+# }else{}
+
+# Add two new columns based on whether the Property contains "_val" or "_cal"
+mdl.stats_RF_MIR <- mdl.stats %>%
+  mutate(Property_Name = gsub("(_cal|_val).*", "", Property),
+         Data_Type = ifelse(grepl("_val", Property), "_val", "_cal"))
+
+#Write model statistics and predicted values to the local drive
+write.csv(mdl.stats_RF_MIR, paste0(getwd(),"/Model_Statistics_RF_MIR.csv"),row.names = F)
+write.csv(pred, paste0(getwd(),"/Predicted_Biochar_Properties_RF_MIR.csv"),row.names = F)
+getwd()
+
+saveRDS(mdl.stats_RF_MIR,"mdl.stats_RF_MIR.RDS")
+
+```
+
+```{r}
+
+mdl.stats_RF_MIR <- readRDS("mdl.stats_RF_MIR.RDS")
+
+# Add two new columns based on whether the Property contains "_val" or "_cal"
+mdl.stats_RF_MIR <- mdl.stats %>%
+  mutate(Property_Name = gsub("(_cal|_val).*", "", Property),
+         Data_Type = ifelse(grepl("_val", Property), "_val", "_cal"))
+
+#Write model statistics and predicted values to the local drive
+write.csv(mdl.stats_RF_MIR, paste0(getwd(),"/Model_Statistics_RF_MIR.csv"),row.names = F)
+write.csv(pred, paste0(getwd(),"/Predicted_Biochar_Properties_RF_MIR.csv"),row.names = F)
+getwd()
+
+# Filter out rows with missing R2 values
+mdl.stats_filtered <- mdl.stats_RF_MIR[complete.cases(mdl.stats_RF_MIR$R2), ]
+
+# Order the properties based on R2 values in descending order for _cal data
+ordered_props_cal <- mdl.stats_filtered[mdl.stats_filtered$Data_Type == "_cal", ]
+ordered_props_cal <- ordered_props_cal[order(-ordered_props_cal$R2), "Property_Name"]
+top_properties_cal <- head(ordered_props_cal, 10)
+
+# Filter the original dataframe for the selected top properties and both _cal and _val data
+mdl.stats_top <- mdl.stats_filtered[mdl.stats_filtered$Property_Name %in% top_properties_cal, ]
+
+# Create a new factor variable to control the order of bars
+mdl.stats_top$Property_Name <- factor(mdl.stats_top$Property_Name, levels = top_properties_cal)
+
+# Plotting
+cal_val_top_plot <- ggplot(mdl.stats_top, aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  labs(title = "Top Properties with Highest R2 for PLR RF",
+       x = "Property",
+       y = "R2") +
+  theme_minimal()+
+   theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels by 45 degrees
+
+# Save the plot
+ggsave(paste0(getwd(), "/cal_val_RF_MIR", ".png"),
+       plot = cal_val_top_plot,
+       width = 8,
+       height = 6, 
+       units = "in",
+       dpi = 300)
+
+
+
+# Extract relevant columns for the top properties and both _cal and _val data
+mdl.stats_table <- mdl.stats_filtered[mdl.stats_filtered$Property_Name %in% top_properties_cal, c("Property_Name", "Data_Type","R2", "RPIQ", "RMSE", "bias", "N")]
+
+# Create a new factor variable to control the order of rows in the table
+mdl.stats_table$Property_Name <- factor(mdl.stats_table$Property_Name, levels = top_properties_cal)
+
+# Order the rows based on Property_Name and Data_Type
+mdl.stats_table <- mdl.stats_table[order(mdl.stats_table$Property_Name, mdl.stats_table$Data_Type), ]
+
+# Create a table with the top properties, both _cal and _val data
+
+mdl.stats_table_wide <- mdl.stats_table %>%
+  pivot_wider(
+    id_cols = c("Property_Name"),
+    names_from = "Data_Type",
+    values_from = c("R2", "RPIQ", "RMSE", "bias", "N"),
+    names_sep = "_"
+  )
+
+# Save the table to a CSV file
+write.csv(mdl.stats_table, paste0(getwd(), "/Top_Properties_Stats_RF_MIR.csv"), row.names = FALSE)
+```
+
+### 

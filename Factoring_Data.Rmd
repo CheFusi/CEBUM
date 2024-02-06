@@ -1,0 +1,234 @@
+---
+title: "CEBUM_Biochar_Factors"
+output: html_document
+date: "2024-02-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 
+
+### Grouping Reference Data
+
+Grouping reference data by temperature
+
+```{r}
+
+#Recalling df.f since it's been overidden
+df.f<-readRDS("df_f.RDS")
+
+#Creating a new column 
+
+# df.f<-df.f %>%
+#   dplyr::mutate(Temp_factor = case_when(Temp.>=200 & Temp.<300 ~ 2,
+#                                   Temp.>=300 & Temp.<400 ~ 3,
+#                                   Temp.>=400 & Temp.<500 ~ 4,
+#                                   Temp.>=500 & Temp.<600 ~ 5,
+#                                   Temp.>=600 & Temp.<1000 ~ 6))
+
+#first attempt with only two factor types
+
+df.f<-df.f %>%
+  dplyr::mutate(Temp_factor = case_when(Temp.>=200 & Temp.<400 ~ 1,
+                                        Temp.>=400 & Temp.<=550 ~ 2,
+                                  Temp.>550 & Temp.<1000 ~ 3))
+
+
+df.f$Temp_factor<-as.factor(df.f$Temp_factor)
+##
+
+df.f<-df.f %>%
+  dplyr::mutate(H_C_factor = case_when(Htot_to_Ctot_.molar.>=0 & Htot_to_Ctot_.molar.<=0.5 ~ 1,
+                                       Htot_to_Ctot_.molar.>0.5 & Htot_to_Ctot_.molar.<=2.0 ~ 2))
+
+df.f<-df.f %>%
+  dplyr::mutate(Ash_factor = case_when(Ash_avg>=0 & Ash_avg<=0.45 ~ 1,
+                                       Ash_avg>0.45 & Ash_avg<=1.0 ~ 2))
+
+df.f<-df.f %>%
+  dplyr::mutate(O_C_factor = case_when(Oult_to_Ctot_.molar.>=0 & Oult_to_Ctot_.molar.<=0.25 ~ 1,
+  
+                                       Oult_to_Ctot_.molar.>=0.25 & Oult_to_Ctot_.molar.<=0.45 ~ 2,
+                                       Oult_to_Ctot_.molar.>0.45 & Oult_to_Ctot_.molar.<=1.5 ~ 3))
+
+
+df.f$Temp_factor<-as.factor(df.f$Temp_factor)
+df.f$H_C_factor<-as.factor(df.f$H_C_factor)
+df.f$Ash_factor<-as.factor(df.f$Ash_factor)
+df.f$O_C_factor<-as.factor(df.f$O_C_factor)
+df.f$Temp.<-as.numeric(df.f$Temp.)
+#Need to consider including NA as a level (mutate doesn't do it)
+
+df.f_split_Temp<-split(df.f,df.f$Temp_factor)
+df.f_split_H_C<-split(df.f,df.f$H_C_factor)
+df.f_split_Ash<-split(df.f,df.f$Ash_factor)
+df.f_split_O_C<-split(df.f,df.f$O_C_factor)
+
+df_f_H_C_1<-df.f_split_H_C[["1"]]
+df_f_H_C_2<-df.f_split_H_C[["2"]]
+
+df_f_Ash_1<-df.f_split_Ash[["1"]]
+df_f_Ash_2<-df.f_split_Ash[["2"]]
+
+saveRDS(df_f_Ash_1,"df_f_Ash_1.RDS")
+saveRDS(df_f_Ash_2,"df_f_Ash_2.RDS")
+saveRDS(df_f_H_C_1,"df_f_H_C_1.RDS")
+saveRDS(df_f_H_C_2,"df_f_H_C_2.RDS")
+```
+
+```{r}
+
+
+saveRDS(df.f,"df_f_factors.RDS")
+
+
+```
+
+## PCA with Reference Data for Grouping
+
+```{r}
+
+ #Merging spectral (spec_trt) used for PCA earlier with ref data (df.f)
+
+#removed samples with Temp = 950 
+
+spec_ref1 <- merge(df.f,spec_trt)
+
+spec_refA<-spec_ref1%>% filter(is.na(Temp.)|Temp.!=950)
+
+
+#removing the ref data for the PCA
+x<-as.numeric(ncol(df.f))
+
+pcs1 <- prcomp(spec_refA[,-c(1:x)])
+
+#?extracting the first 10 components?
+pcss1 <- pcs1$x[,1:10]
+
+pcss1[1:6,]
+
+plot(pcss1)
+
+```
+
+```{r}
+g <- ggbiplot::ggbiplot(pcs1, #need to specify which library the command is coming from, gives errors otherwise
+              obs.scale = 1,
+              var.scale = 1 ,
+              groups = spec_refA$Temp.,
+              #ellipse = TRUE,
+              ##circle = TRUE,
+              #ellipse.prob = 0.68,
+              var.axes=FALSE)
+
+g<-g + scale_fill_discrete(name="Temp")
+   #  + guides(color=guide_legend("Temp."))
+g
+
+```
+
+### PCA with Temperature Factor
+
+```{r}
+
+g1 <- ggbiplot::ggbiplot(pcs1, #need to specify which library the command is coming from, gives errors otherwise
+              obs.scale = 1,
+              var.scale = 1 ,
+              groups = spec_refA$Temp_factor,
+              #ellipse = TRUE,
+              #circle = TRUE,
+              #ellipse.prob = 0.68,
+              var.axes=FALSE) 
+
+g1<- g1 + labs(title = "PCA plot with Temp Factor") +
+  theme_minimal() + 
+  #theme_void() +  # This removes both grid and background
+  theme(panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 2),
+                                    plot.title = element_text(hjust = 0.5))+
+  guides(color=guide_legend("Temperature Range (C)")) + 
+  scale_color_manual(labels = c("200-400","400-550","550+","NA"), values=c("brown","red","orange","green")) 
+g1
+```
+
+### PCA with H:C Factor
+
+```{r}
+
+plot_pca_HC <- ggbiplot::ggbiplot(pcs1, #need to specify which library the command is coming from, gives errors otherwise
+              obs.scale = 1,
+              var.scale = 1 ,
+              groups = spec_refA$H_C_factor,
+              #ellipse = TRUE,
+              ##circle = TRUE,
+              #ellipse.prob = 0.68,
+              var.axes=FALSE) 
+
+
+plot_pca_HC<- plot_pca_HC + labs(title = "PCA plot with HC Factor") +
+  theme_minimal() +
+  theme(panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 2),
+                                    plot.title = element_text(hjust = 0.5))+
+  guides(color=guide_legend("H:C Range")) + 
+  scale_color_manual(labels = c("0-0.5",">0.5"), values=c("orange","green")) 
+plot_pca_HC
+```
+
+### PCA with Ash Factor
+
+```{r}
+
+plot_pca_Ash <- ggbiplot::ggbiplot(pcs1, #need to specify which library the command is coming from, gives errors otherwise
+              obs.scale = 1,
+              var.scale = 1 ,
+              groups = spec_refA$Ash_factor,
+              #ellipse = TRUE,
+              ##circle = TRUE,
+              #ellipse.prob = 0.68,
+              var.axes=FALSE) 
+
+
+plot_pca_Ash<- plot_pca_Ash + labs(title = "PCA plot with Ash Factor") +
+  theme_minimal() +
+  theme(panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 2),
+                                    plot.title = element_text(hjust = 0.5))+
+  guides(color=guide_legend("Ash Range")) + 
+  scale_color_manual(labels = c("0-0.45","0.45-1"), values=c("purple","gold")) 
+plot_pca_Ash
+```
+
+### PCA with O:C Factor
+
+```{r}
+
+plot_pca_O_C <- ggbiplot::ggbiplot(pcs1, #need to specify which library the command is coming from, gives errors otherwise
+              obs.scale = 1,
+              var.scale = 1 ,
+              groups = spec_refA$O_C_factor,
+              #ellipse = TRUE,
+              ##circle = TRUE,
+              #ellipse.prob = 0.68,
+              var.axes=FALSE) 
+
+
+plot_pca_O_C <- plot_pca_O_C  + labs(title = "PCA plot with O:C Factor") +
+  theme_minimal() +
+  theme(panel.border = element_rect(color = "black",
+                                    fill = NA,
+                                    size = 2),
+                                    plot.title = element_text(hjust = 0.5))+
+  guides(color=guide_legend("O:C Range")) + 
+  scale_color_manual(labels = c("0-0.15","0.15-0.45",">0.45"), values=c("peru","pink","green")) 
+plot_pca_O_C
+```
+
+## 
+
+f

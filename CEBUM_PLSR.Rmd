@@ -34,8 +34,26 @@ QUESTION:
 
 -   or which method of splitting calibration and training data is used? KS or the random setseed123 used later in this script?
 
-```{r}
+Loading libraries
+
+```{r, warning=FALSE}
+##################### Random Forest Modelling #################################
+library(randomForest)
+library(caret)
+library(pls)
+library(data.table)
+#If package ithir is not available for your version of R
+#Use the 3 below lines to install package ithir
+# install.packages("devtools") 
+# library(devtools)
+# install_bitbucket("brendo1001/ithir/pkg") or devtools::install_bitbucket("brendo1001/ithir/pkg")
+
+library(ithir)
+#used to extract model statistics like RMSE etc.
+#using a function called: goof: see here: https://rdrr.io/rforge/ithir/src/R/goof.R 
+library(data.table)
 library(dplyr)
+library(tidyr)
 library(prospectr)
 library (globals)
 library(stringr)
@@ -66,25 +84,6 @@ spectraldata.fin.fin<-spec_trt[is.element(spec_trt$SSN, df.f$SSN),] ## FUSI Stil
 
 ## Partial Least Squares Regression
 
-Loading libraries
-
-```{r, warning=FALSE}
-##################### Random Forest Modelling #################################
-library(randomForest)
-library(caret)
-library(pls)
-library(data.table)
-#If package ithir is not available for your version of R
-#Use the 3 below lines to install package ithir
-# install.packages("devtools") 
-# library(devtools)
-# install_bitbucket("brendo1001/ithir/pkg") or devtools::install_bitbucket("brendo1001/ithir/pkg")
-
-library(ithir)
-#used to extract model statistics like RMSE etc.
-#using a function called: goof: see here: https://rdrr.io/rforge/ithir/src/R/goof.R 
-```
-
 ### PLSR Model
 
 ```{r}
@@ -100,12 +99,19 @@ library(ithir)
 # also removed the columns for char and char type
 
 names(df.f)
-slprptr<-names(df.f[-c(2:4)]) #FUSI EDIT: removing metadata columns
+slprptr<-names(df.f[-c(2:4)]) #FUSI EDIT: removing metadata columns 
 
 pred<-as.data.frame(spec_trt[,1])
 colnames(pred)<-"SSN"
 
+
+#FUSI EDIT
+
 mdl.stats<-NULL#Model stats container
+top_loadings_df_pc1 <- NULL
+top_loadings_df_pc2  <- NULL
+
+
 
 #FUSI EDIT: started at 3, instead of 2 because the first column in the char type
 for(p in 23:length(slprptr)){
@@ -260,9 +266,53 @@ df.prd<-bind_cols(SSN=rownames(prd),prd[,nc])
 colnames(df.prd)<-c("SSN",slprptr[p])
 
 pred<-merge(pred, df.prd, by="SSN", all.x = T)
+
+
+
+
+#FUSI EDIT: extracting top loadings
+
+  # Extract loadings
+  loadings <- pls.md$loadings
+  
+  # Identify the top loaded variables for each component
+  top_loaded_variables_pc1 <- head(names(sort(abs(loadings[, 1]), decreasing = TRUE)), 30)
+  top_loaded_variables_pc2 <- head(names(sort(abs(loadings[, 2]), decreasing = TRUE)), 30)
+  
+  #remove single quotes
+  top_loaded_variables_pc1<- gsub("`|'", "", top_loaded_variables_pc1)
+  top_loaded_variables_pc2<- gsub("`|'", "", top_loaded_variables_pc2)
+  
+  # plsce them in a dataframe 
+  df_pc1 <- t(data.frame(as.numeric(top_loaded_variables_pc1), stringsAsFactors = FALSE))
+  df_pc2 <- t(data.frame(as.numeric(top_loaded_variables_pc2), stringsAsFactors = FALSE))
+  
+  # Optionally, set the column names
+colnames(df_pc1) <- paste0("Loading_", 1:ncol(df_pc1))
+colnames(df_pc2) <- paste0("Loading_", 1:ncol(df_pc2))
+  
+  # Create data frame for PC1 loadings
+  df_pc1_var <- data.frame(Response_Variable = slprptr[p])
+  
+  # Create data frame for PC2 loadings
+  df_pc2_var <- data.frame(Response_Variable = slprptr[p])
+  
+  # Append data frames to the main data frames
+  top_loadings_df_pc1 <- bind_rows(top_loadings_df_pc1, bind_cols(df_pc1_var, df_pc1))
+  top_loadings_df_pc2 <- bind_rows(top_loadings_df_pc2, bind_cols(df_pc2_var, df_pc2))
+
+
 }
 #FUSI EDIT: End of for loop
 
+
+
+```
+
+```{r}
+
+write.csv(top_loadings_df_pc1, paste0(getwd(),"/top_loadings_df_pc1_PLSR_MIR.csv"),row.names = F)
+write.csv(top_loadings_df_pc2, paste0(getwd(),"/top_loadings_df_pc2_PLSR_MIR.csv"),row.names = F)
 ```
 
 ```{r}

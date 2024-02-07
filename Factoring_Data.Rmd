@@ -8,7 +8,11 @@ date: "2024-02-06"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## 
+## Load libraries
+
+```{r}
+library(ggbiplot)
+```
 
 ### Grouping Reference Data
 
@@ -18,6 +22,7 @@ Grouping reference data by temperature
 
 #Recalling df.f since it's been overidden
 df.f<-readRDS("df.f.RDS")
+spec_trt <- readRDS("spec_trt_MIR.RDS")
 
 #Creating a new column 
 
@@ -102,9 +107,10 @@ spec_refA<-spec_ref1%>% filter(is.na(Temp.)|Temp.!=950)
 #removing the ref data for the PCA
 x<-as.numeric(ncol(df.f))
 
-pcs1 <- prcomp(spec_refA[,-c(1:x)])
-
+pcs1 <- prcomp(spec_refA[,-c(1:(x+1))]) # removing the first row of the spec data because its NA's
+               
 #?extracting the first 10 components?
+
 pcss1 <- pcs1$x[,1:10]
 
 pcss1[1:6,]
@@ -137,9 +143,9 @@ g1 <- ggbiplot::ggbiplot(pcs1, #need to specify which library the command is com
               obs.scale = 1,
               var.scale = 1 ,
               groups = spec_refA$Temp_factor,
-              #ellipse = TRUE,
+              ellipse = TRUE,
               #circle = TRUE,
-              #ellipse.prob = 0.68,
+              ellipse.prob = 0.68,
               var.axes=FALSE) 
 
 g1<- g1 + labs(title = "PCA plot with Temp Factor") +
@@ -162,9 +168,9 @@ plot_pca_HC <- ggbiplot::ggbiplot(pcs1, #need to specify which library the comma
               obs.scale = 1,
               var.scale = 1 ,
               groups = spec_refA$H_C_factor,
-              #ellipse = TRUE,
+              ellipse = TRUE,
               ##circle = TRUE,
-              #ellipse.prob = 0.68,
+              ellipse.prob = 0.68,
               var.axes=FALSE) 
 
 
@@ -187,9 +193,9 @@ plot_pca_Ash <- ggbiplot::ggbiplot(pcs1, #need to specify which library the comm
               obs.scale = 1,
               var.scale = 1 ,
               groups = spec_refA$Ash_factor,
-              #ellipse = TRUE,
+              ellipse = TRUE,
               ##circle = TRUE,
-              #ellipse.prob = 0.68,
+              ellipse.prob = 0.68,
               var.axes=FALSE) 
 
 
@@ -212,11 +218,10 @@ plot_pca_O_C <- ggbiplot::ggbiplot(pcs1, #need to specify which library the comm
               obs.scale = 1,
               var.scale = 1 ,
               groups = spec_refA$O_C_factor,
-              #ellipse = TRUE,
+              ellipse = TRUE,
               ##circle = TRUE,
-              #ellipse.prob = 0.68,
-              var.axes=FALSE) 
-
+              ellipse.prob = 0.68,
+              var.axes=FALSE)
 
 plot_pca_O_C <- plot_pca_O_C  + labs(title = "PCA plot with O:C Factor") +
   theme_minimal() +
@@ -228,7 +233,3 @@ plot_pca_O_C <- plot_pca_O_C  + labs(title = "PCA plot with O:C Factor") +
   scale_color_manual(labels = c("0-0.15","0.15-0.45",">0.45"), values=c("peru","pink","green")) 
 plot_pca_O_C
 ```
-
-## 
-
-f

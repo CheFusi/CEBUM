@@ -9,12 +9,27 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r}
+library(data.table)
 library(dplyr)
+library(tidyr)
 library(prospectr)
 library (globals)
 library(stringr)
 library(ggplot2)
 library(here)
+
+library(caret)
+library(pls)
+library(data.table)
+#If package ithir is not available for your version of R
+#Use the 3 below lines to install package ithir
+# install.packages("devtools") 
+# library(devtools)
+# install_bitbucket("brendo1001/ithir/pkg") or devtools::install_bitbucket("brendo1001/ithir/pkg")
+
+library(ithir)
+#used to extract model statistics like RMSE etc.
+#using a function called: goof: see here: https://rdrr.io/rforge/ithir/src/R/goof.R 
 ```
 
 Load Reference data

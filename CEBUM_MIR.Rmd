@@ -96,7 +96,7 @@ dim(raw)
 
 ############ Remove spectra metadata ######
  
-raw0 <- raw[-c(1:36),-c(2:17)]
+raw0 <- raw[-c(1:36),-c(2:18)] #FUSI EDIT: removed first wavenumber because it was all NA's
 ## since the MIR samples included some blanks up to row 37
 raw0[1:4,1:4]
 
@@ -488,22 +488,29 @@ barplot(absolute_loadings[, 1:2], beside = TRUE, col = rainbow(5),
         cex.names = 0.7, las = 2)
 #This line creates a bar plot representing the variable importance for the first two principal components (PC1 and PC2).
 
-# Identify the top 10 loaded variables for each principal component
-top_loaded_variables <- apply(absolute_loadings, 2, function(x) head(order(-x), 10))
+# Identify the top 15 loaded variables for each principal component
+top_loaded_variables <- apply(absolute_loadings, 2, function(x) head(order(-x), 15))
 
-# biplot that combines the loading plot and the score plot
 
-# Set row names of scores matrix to NULL to remove sample IDs
-rownames(pcs$x) <- NULL
+# Extract loadings for the first two principal components
+loadings_pc1 <- absolute_loadings[, 1]
+loadings_pc2 <- absolute_loadings[, 2]
 
-suppressWarnings({
-  biplot(pcs, scale = 0)
-})
+# Identify the top 15 loaded variables for each principal component
+top_loaded_variables_pc1 <- head(names(sort(-abs(loadings_pc1))), 15)
+top_loaded_variables_pc2 <- head(names(sort(-abs(loadings_pc2))), 15)
 
-suppressWarnings({
-biplot(pcs, scale = 1, pc.biplot = TRUE)
-})
-#This line creates a biplot, which combines the loading plot and the score plot. In the context of PCA, a biplot shows both the relationships between the variables and the relationships between the observations (scores).
+# Create a data frame to store the top loaded variables and their loadings
+top_loaded_df <- data.frame(PC = c(rep(1, 15), rep(2, 15)),
+                            Variable = c(top_loaded_variables_pc1, top_loaded_variables_pc2),
+                            Loading = c(loadings_pc1[top_loaded_variables_pc1], loadings_pc2[top_loaded_variables_pc2]))
+
+# Save the table to a CSV file
+write.csv(top_loaded_df, file = "top_loaded_variables_pc1_pc2.csv", row.names = FALSE)
+
+```
+
+```{r}
 
 ```
 
@@ -519,9 +526,7 @@ biplot(pcs, scale = 1, pc.biplot = TRUE)
 
     -   section 04: Overlaying, also not used here since we don't have any sort of reference model file
 
-# Section 05
-
-## PLS Model
+# Getting Reference Data
 
 ---
 title: "05CalibrationModels_PLS_Loop_ARC"
@@ -644,4 +649,26 @@ df.f_master <-df.f
 #filtering and removing the columns (reference variables) where more than 70% of data is missing/NA
 
 saveRDS(df.f,"df.f.RDS")
+```
+
+## Summary statistics
+
+```{r}
+
+library(skimr)
+# Generate summary statistics
+summary_stats <- skim(df.f[,-c(1:5)])
+
+
+# Remove "numeric." prefix from column names
+colnames(summary_stats) <- sub("numeric\\.", "", colnames(summary_stats))
+
+# Remove some columns
+summary_stats <- subset(summary_stats, select = -c(hist,skim_type))
+
+
+
+# Write summary statistics to a CSV file
+write.csv(summary_stats, file = "summary_statistics.csv")
+
 ```

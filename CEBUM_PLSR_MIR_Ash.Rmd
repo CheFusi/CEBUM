@@ -8,6 +8,32 @@ date: "2024-02-06"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+load librarires
+
+```{r}
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(prospectr)
+library (globals)
+library(stringr)
+library(ggplot2)
+library(here)
+
+library(caret)
+library(pls)
+library(data.table)
+#If package ithir is not available for your version of R
+#Use the 3 below lines to install package ithir
+# install.packages("devtools") 
+# library(devtools)
+# install_bitbucket("brendo1001/ithir/pkg") or devtools::install_bitbucket("brendo1001/ithir/pkg")
+
+library(ithir)
+#used to extract model statistics like RMSE etc.
+#using a function called: goof: see here: https://rdrr.io/rforge/ithir/src/R/goof.R 
+```
+
 Load Reference data
 
 ```{r}
@@ -237,7 +263,7 @@ mdl.stats_filtered <- mdl.stats_PLSR_MIR_Ash1[complete.cases(mdl.stats_PLSR_MIR_
 # Order the properties based on R2 values in descending order for _cal data
 ordered_props_cal <- mdl.stats_filtered[mdl.stats_filtered$Data_Type == "_cal", ]
 ordered_props_cal <- ordered_props_cal[order(-ordered_props_cal$R2), "Property_Name"]
-top_properties_cal <- head(ordered_props_cal, 10)
+top_properties_cal <- head(ordered_props_cal, 20)
 
 # Filter the original dataframe for the selected top properties and both _cal and _val data
 mdl.stats_top <- mdl.stats_filtered[mdl.stats_filtered$Property_Name %in% top_properties_cal, ]
@@ -251,7 +277,8 @@ cal_val_top_plot <- ggplot(mdl.stats_top, aes(x = Property_Name, y = R2, fill = 
   labs(title = "Top Properties with Highest R2 for PLSR MIR Ash1",
        x = "Property",
        y = "R2") +
-  theme_minimal()
+  theme_minimal()+
+   theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels by 45 degrees
 
 # Save the plot
 ggsave(paste0(getwd(), "/cal_val_PLSR_MIR_Ash1", ".png"),
@@ -262,6 +289,30 @@ ggsave(paste0(getwd(), "/cal_val_PLSR_MIR_Ash1", ".png"),
        dpi = 300)
 
 
+
+
+# Extract relevant columns for the top properties and both _cal and _val data
+mdl.stats_table <- mdl.stats_filtered[mdl.stats_filtered$Property_Name %in% top_properties_cal, c("Property_Name", "Data_Type","R2", "RPIQ", "RMSE", "bias", "N")]
+
+# Create a new factor variable to control the order of rows in the table
+mdl.stats_table$Property_Name <- factor(mdl.stats_table$Property_Name, levels = top_properties_cal)
+
+# Order the rows based on Property_Name and Data_Type
+mdl.stats_table <- mdl.stats_table[order(mdl.stats_table$Property_Name, mdl.stats_table$Data_Type), ]
+
+# Create a table with the top properties, both _cal and _val data
+mdl.stats_table_wide <- spread(mdl.stats_table, Data_Type, value = c("R2","RPIQ", "RMSE", "bias", "N"))
+
+mdl.stats_table_wide <- mdl.stats_table %>%
+  pivot_wider(
+    id_cols = c("Property_Name"),
+    names_from = "Data_Type",
+    values_from = c("R2","RPIQ", "RMSE", "bias", "N"),
+    names_sep = "_"
+  )
+
+# Save the table to a CSV file
+write.csv(mdl.stats_table, paste0(getwd(), "/Top_Properties_Stats_PLSR_MIR_Ash1.csv"), row.names = FALSE)
 ```
 
 ## Correlation Matrices

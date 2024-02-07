@@ -9,7 +9,9 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r}
+library(data.table)
 library(dplyr)
+library(tidyr)
 library(prospectr)
 library (globals)
 library(stringr)
@@ -57,6 +59,8 @@ pred<-as.data.frame(spec_trt[,1])
 colnames(pred)<-"SSN"
 
 mdl.stats<-NULL#Model stats container
+top_loadings_df_pc1 <- NULL
+top_loadings_df_pc2 <- NULL
 
 for(p in 23:length(slprptr)){
   
@@ -185,7 +189,52 @@ df.prd<-bind_cols(SSN=rownames(prd),prd)
 colnames(df.prd)<-c("SSN",slprptr[p])
 
 pred<-merge(pred,df.prd,by="SSN", all.x = T)
+
+
+#FUSI EDIT: extracting top loadings
+
+  # Extract loadings
+  loadings <- pls.md$loadings
+  
+  # Identify the top loaded variables for each component
+  top_loaded_variables_pc1 <- head(names(sort(abs(loadings[, 1]), decreasing = TRUE)), 30)
+  top_loaded_variables_pc2 <- head(names(sort(abs(loadings[, 2]), decreasing = TRUE)), 30)
+  
+  #remove single quotes
+  top_loaded_variables_pc1<- gsub("`|'", "", top_loaded_variables_pc1)
+  top_loaded_variables_pc2<- gsub("`|'", "", top_loaded_variables_pc2)
+  
+  # plsce them in a dataframe 
+  df_pc1 <- t(data.frame(as.numeric(top_loaded_variables_pc1), stringsAsFactors = FALSE))
+  df_pc2 <- t(data.frame(as.numeric(top_loaded_variables_pc2), stringsAsFactors = FALSE))
+  
+  # Optionally, set the column names
+colnames(df_pc1) <- paste0("Loading_", 1:ncol(df_pc1))
+colnames(df_pc2) <- paste0("Loading_", 1:ncol(df_pc2))
+  
+  # Create data frame for PC1 loadings
+  df_pc1_var <- data.frame(Response_Variable = slprptr[p])
+  
+  # Create data frame for PC2 loadings
+  df_pc2_var <- data.frame(Response_Variable = slprptr[p])
+  
+  # Append data frames to the main data frames
+  top_loadings_df_pc1 <- bind_rows(top_loadings_df_pc1, bind_cols(df_pc1_var, df_pc1))
+  top_loadings_df_pc2 <- bind_rows(top_loadings_df_pc2, bind_cols(df_pc2_var, df_pc2))
+
+
 }
+
+
+```
+
+```{r}
+
+write.csv(top_loadings_df_pc1, paste0(getwd(),"/top_loadings_df_pc1_RF_MIR.csv"),row.names = F)
+write.csv(top_loadings_df_pc2, paste0(getwd(),"/top_loadings_df_pc2_RF_MIR.csv"),row.names = F)
+```
+
+```{r}
 
 #Remove the least reliably predicted texture data (Clay,Sand or Silt)
 #Recalculate the removed texture data to make Clay+Sand+Silt=100% content

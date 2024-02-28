@@ -73,7 +73,7 @@ spec_trt <- spec_trt[,-2] #removing the data for the first wavenumber since it's
 
 df.f<-readRDS("df.f.RDS")
 
-threshold_na <- 0.85 #for a 85% cut-off
+threshold_na <- 0.95 #for a 85% cut-off
 
 df.f<-
   df.f %>% select(where(~mean(is.na(.)) < threshold_na))
@@ -111,6 +111,8 @@ mdl.stats<-NULL#Model stats container
 top_loadings_df_pc1 <- NULL
 top_loadings_df_pc2  <- NULL
 
+# Create directory for saving wavenumbers vs. loadings plots
+dir.create("Wavenumbers_vs_Loadings_PLSR_MIR")
 
 
 #FUSI EDIT: started at 3, instead of 2 because the first column in the char type
@@ -126,6 +128,20 @@ dir.create("Plots_Boxplots_PLSR_MIR")
 png(paste0(getwd(),"/Plots_Boxplots_PLSR_MIR/",slprptr[p],".png"))
 print(boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = ""))
 dev.off()
+
+# Plot and print Biochar properties violin plots
+violin_plot <- ggplot(data = df.sel, aes(x = "", y = !!sym(slprptr[p]))) +
+  geom_violin(fill = "skyblue", color = "blue") +  # Customize fill and border color
+  geom_boxplot(width = 0.1, fill = "white", color = "black") +  # Add box plot for reference
+  labs(x = "", y = slprptr[p]) +  # Customize axis labels
+  coord_flip() +  # Rotate plot by 90 degrees for horizontal orientation
+  theme_minimal() +  # Use a minimal theme
+  theme(axis.text.x = element_blank()) +  # Hide x-axis labels
+  ggtitle(paste("Violin Plot of", slprptr[p]))  # Add plot title
+
+# Save plot as PNG
+ggsave(paste0("Plots_Violinplots_PLSR_MIR/", slprptr[p], ".png"), plot = violin_plot)
+
 
 # #Split samples inside loop for variables with many NAs
 # #Set splitting proportion for the calibration and validation data
@@ -151,6 +167,9 @@ cal_df_or<-cal_df[order(rownames(cal_df)),]
 
 val_df<-setorder(val_df)
 cal_df<-setorder(cal_df)
+
+ # Check if val_df is empty
+  if (nrow(val_df) > 0) { 
 
 #Subset pre-treated spectra by available reference data
 val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
@@ -268,12 +287,26 @@ colnames(df.prd)<-c("SSN",slprptr[p])
 pred<-merge(pred, df.prd, by="SSN", all.x = T)
 
 
-
+  } else {
+    print(paste("Skipping testing parameter:", slprptr[p], "because val_df is empty."))
+  }
 
 #FUSI EDIT: extracting top loadings
 
   # Extract loadings
   loadings <- pls.md$loadings
+  
+  # Get wavenumbers
+  wavenumbers <- rownames(loadings)
+
+# Plot wavenumbers vs. loadings
+wavenumbers_numeric <- as.numeric(gsub("`", "", wavenumbers))  # Remove backticks and convert to numeric
+plot(wavenumbers_numeric, loadings[, nc], type = "l", xlab = "Wavenumbers", ylab = "Loadings", main = paste("Wavenumbers vs. Loadings for", slprptr[p]), xlim = rev(range(wavenumbers_numeric)))
+png(paste0(getwd(), "/Wavenumbers_vs_Loadings_PLSR_MIR/", slprptr[p], "_loadings.png"))
+print(plot(wavenumbers_numeric, loadings[, nc], type = "l", xlab = "Wavenumbers", ylab = "Loadings", main = paste("Wavenumbers vs. Loadings for", slprptr[p]), xlim = rev(range(wavenumbers_numeric))))
+dev.off()
+  
+  
   
   # Identify the top loaded variables for each component
   top_loaded_variables_pc1 <- head(names(sort(abs(loadings[, 1]), decreasing = TRUE)), 30)

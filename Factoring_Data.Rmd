@@ -12,6 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r}
 library(ggbiplot)
+library(RColorBrewer)
 ```
 
 ### Grouping Reference Data
@@ -24,16 +25,9 @@ Grouping reference data by temperature
 df.f<-readRDS("df.f.RDS")
 spec_trt <- readRDS("spec_trt_MIR.RDS")
 
-#Creating a new column 
+#converting class to factor
 
-# df.f<-df.f %>%
-#   dplyr::mutate(Temp_factor = case_when(Temp.>=200 & Temp.<300 ~ 2,
-#                                   Temp.>=300 & Temp.<400 ~ 3,
-#                                   Temp.>=400 & Temp.<500 ~ 4,
-#                                   Temp.>=500 & Temp.<600 ~ 5,
-#                                   Temp.>=600 & Temp.<1000 ~ 6))
-
-#first attempt with only two factor types
+df.f$Class <- as.factor(df.f$Class)
 
 df.f<-df.f %>%
   dplyr::mutate(Temp_factor = case_when(Temp.>=200 & Temp.<400 ~ 1,
@@ -45,8 +39,8 @@ df.f$Temp_factor<-as.factor(df.f$Temp_factor)
 ##
 
 df.f<-df.f %>%
-  dplyr::mutate(H_C_factor = case_when(Htot_to_Ctot_.molar.>=0 & Htot_to_Ctot_.molar.<=0.5 ~ 1,
-                                       Htot_to_Ctot_.molar.>0.5 & Htot_to_Ctot_.molar.<=2.0 ~ 2))
+  dplyr::mutate(H_C_factor = case_when(Htot_to_Ctot_.molar.>=0 & Htot_to_Ctot_.molar.<=1.25 ~ 1,
+                                       Htot_to_Ctot_.molar.>1.25 & Htot_to_Ctot_.molar.<=2.0 ~ 2))
 
 df.f<-df.f %>%
   dplyr::mutate(Ash_factor = case_when(Ash_avg>=0 & Ash_avg<=0.45 ~ 1,
@@ -120,19 +114,22 @@ plot(pcss1)
 ```
 
 ```{r}
-g <- ggbiplot::ggbiplot(pcs1, #need to specify which library the command is coming from, gives errors otherwise
-              obs.scale = 1,
-              var.scale = 1 ,
-              groups = spec_refA$Temp.,
-              #ellipse = TRUE,
-              ##circle = TRUE,
-              #ellipse.prob = 0.68,
-              var.axes=FALSE)
 
-g<-g + scale_fill_discrete(name="Temp")
-   #  + guides(color=guide_legend("Temp."))
-g
 
+# Assuming pcs1 is your principal component scores data
+g <- ggbiplot::ggbiplot(pcs1,
+                        obs.scale = 1,
+                        var.scale = 1 ,
+                        groups = spec_refA$Class,
+                        var.axes = FALSE)
+
+g <- g + scale_color_brewer(palette = "Set1", name = "Biochar Class") + # Using viridis color palette
+  theme_minimal() +
+  theme(panel.grid = element_blank(),  # Remove grid
+        panel.border = element_rect(color = "black", fill = NA, size = 2),
+        plot.title = element_text(hjust = 0.5))
+
+g 
 ```
 
 ### PCA with Temperature Factor
@@ -143,9 +140,9 @@ g1 <- ggbiplot::ggbiplot(pcs1, #need to specify which library the command is com
               obs.scale = 1,
               var.scale = 1 ,
               groups = spec_refA$Temp_factor,
-              ellipse = TRUE,
+              #ellipse = TRUE,
               #circle = TRUE,
-              ellipse.prob = 0.68,
+              #ellipse.prob = 0.68,
               var.axes=FALSE) 
 
 g1<- g1 + labs(title = "PCA plot with Temp Factor") +
@@ -168,9 +165,9 @@ plot_pca_HC <- ggbiplot::ggbiplot(pcs1, #need to specify which library the comma
               obs.scale = 1,
               var.scale = 1 ,
               groups = spec_refA$H_C_factor,
-              ellipse = TRUE,
+              #ellipse = TRUE,
               ##circle = TRUE,
-              ellipse.prob = 0.68,
+              #ellipse.prob = 0.68,
               var.axes=FALSE) 
 
 
@@ -181,7 +178,7 @@ plot_pca_HC<- plot_pca_HC + labs(title = "PCA plot with HC Factor") +
                                     size = 2),
                                     plot.title = element_text(hjust = 0.5))+
   guides(color=guide_legend("H:C Range")) + 
-  scale_color_manual(labels = c("0-0.5",">0.5"), values=c("orange","green")) 
+  scale_color_manual(labels = c("0-1.25",">1.25"), values=c("orange","green")) 
 plot_pca_HC
 ```
 
@@ -193,9 +190,9 @@ plot_pca_Ash <- ggbiplot::ggbiplot(pcs1, #need to specify which library the comm
               obs.scale = 1,
               var.scale = 1 ,
               groups = spec_refA$Ash_factor,
-              ellipse = TRUE,
+              #ellipse = TRUE,
               ##circle = TRUE,
-              ellipse.prob = 0.68,
+              #ellipse.prob = 0.68,
               var.axes=FALSE) 
 
 
@@ -218,9 +215,9 @@ plot_pca_O_C <- ggbiplot::ggbiplot(pcs1, #need to specify which library the comm
               obs.scale = 1,
               var.scale = 1 ,
               groups = spec_refA$O_C_factor,
-              ellipse = TRUE,
+              #ellipse = TRUE,
               ##circle = TRUE,
-              ellipse.prob = 0.68,
+              #ellipse.prob = 0.68,
               var.axes=FALSE)
 
 plot_pca_O_C <- plot_pca_O_C  + labs(title = "PCA plot with O:C Factor") +

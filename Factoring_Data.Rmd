@@ -10,12 +10,87 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Load libraries
 
-```{r}
+```{r, message=FALSE}
 library(ggbiplot)
 library(RColorBrewer)
+library(viridis)
+library(dplyr)
 ```
 
-### Grouping Reference Data
+### Grouping Reference Data and Plotting for All Characteristics
+
+```{r}
+
+
+# Function to segment data and create plot for each column
+create_plots <- function(col_name, df) {
+  # Copy the original column to ensure the original data is preserved
+  col_numeric <- df[[col_name]]
+  
+  # Convert the column to numeric, handling NAs
+  col_numeric <- as.numeric(as.character(col_numeric))
+  col_numeric[is.na(df[[col_name]])] <- NA
+  
+  # Determine breaks automatically
+  
+  # if I want equal interval breaks
+  # breaks <- pretty(col_numeric, n = 4)
+  breaks <- quantile(df.f[[col_name]], probs = seq(0, 1, by = 1/4), na.rm = TRUE)
+  
+   # Check if breaks are unique
+  if (length(unique(breaks)) != length(breaks)) {
+    # If breaks are not unique, use 'pretty' option
+    breaks <- pretty(df.f[[col_name]][!is.na(df.f[[col_name]])], n = 4)
+  }
+  
+  
+  # Segment the data into equal intervals
+  df_factors <- df %>%
+    mutate(!!paste0(col_name, "_Factor") := cut(col_numeric, breaks = breaks, labels = paste0(breaks[-length(breaks)], "-", breaks[-1])))
+  
+  # Merge with spectral data
+  spec_ref1 <- merge(df_factors, spec_trt)
+  
+  # Remove the ref data for the PCA
+  x <- as.numeric(ncol(df_factors))
+  pcs1 <- prcomp(spec_ref1[,-c(1:(x+2))])
+  
+  # Plot the data
+  g1 <- ggbiplot(pcs1,
+                 obs.scale = 1,
+                 var.scale = 1,
+                 groups = spec_ref1[[paste0(col_name, "_Factor")]],
+                 var.axes = FALSE) +
+    labs(title = paste("PCA plot with", col_name, "for column", col_name)) +
+    theme_minimal() +
+    theme(panel.border = element_rect(color = "black",
+                                      fill = NA,
+                                      size = 2),
+          plot.title = element_text(hjust = 0.5)) +
+    guides(color = guide_legend(paste0(col_name, " Range")))
+  
+  return(g1)
+}
+
+#Recall df.f
+df.f<-readRDS("df.f.RDS")
+spec_trt <- readRDS("spec_trt_MIR.RDS")
+
+# Get column names except the first few which are ID and metadata
+df_columns <- names(df.f)[-c(1:9)]
+
+# Create plots for each column
+plots_list <- lapply(df_columns, create_plots, df = df.f)
+
+# Print all plots
+for (i in seq_along(plots_list)) {
+  print(plots_list[[i]])
+}
+
+
+```
+
+### Manually Grouping Reference Data
 
 Grouping reference data by temperature
 
@@ -113,18 +188,40 @@ plot(pcss1)
 
 ```
 
+### PCA with Class Factor
+
 ```{r}
 
-
-# Assuming pcs1 is your principal component scores data
 g <- ggbiplot::ggbiplot(pcs1,
                         obs.scale = 1,
                         var.scale = 1 ,
                         groups = spec_refA$Class,
                         var.axes = FALSE)
 
-g <- g + scale_color_brewer(palette = "Set1", name = "Biochar Class") + # Using viridis color palette
+g <- g + scale_color_brewer(palette = "Set1", name = "Biochar Class") + 
   theme_minimal() +
+  theme(panel.grid = element_blank(),  # Remove grid
+        panel.border = element_rect(color = "black", fill = NA, size = 2),
+        plot.title = element_text(hjust = 0.5))
+
+g 
+```
+
+### PCA with Feedstock Factor
+
+```{r}
+
+# Custom color palette with 20 distinct colors
+custom_palette <- colorRampPalette(brewer.pal(8, "Set1"))(30)
+
+g <- ggbiplot::ggbiplot(pcs1,
+                        obs.scale = 1,
+                        var.scale = 1,
+                        groups = spec_refA$Feedstock,
+                        var.axes = FALSE)
+
+g <- g + scale_color_manual(values = custom_palette, name = "Biochar Feedstock") +
+    theme_minimal() +
   theme(panel.grid = element_blank(),  # Remove grid
         panel.border = element_rect(color = "black", fill = NA, size = 2),
         plot.title = element_text(hjust = 0.5))

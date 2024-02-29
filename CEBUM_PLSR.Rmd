@@ -73,10 +73,10 @@ spec_trt <- spec_trt[,-2] #removing the data for the first wavenumber since it's
 
 df.f<-readRDS("df.f.RDS")
 
-threshold_na <- 0.95 #for a 85% cut-off
-
-df.f<-
-  df.f %>% select(where(~mean(is.na(.)) < threshold_na))
+# threshold_na <- 0.95 #for a 95% cut-off
+# 
+# df.f<-
+#   df.f %>% select(where(~mean(is.na(.)) < threshold_na))
 
 spectraldata.fin.fin<-spec_trt[is.element(spec_trt$SSN, df.f$SSN),] ## FUSI Still unclear what this is for. Changed to reference spec_trt
  
@@ -86,7 +86,7 @@ spectraldata.fin.fin<-spec_trt[is.element(spec_trt$SSN, df.f$SSN),] ## FUSI Stil
 
 ### PLSR Model
 
-```{r}
+```{r, warning=FALSE}
 
 #Available properties to predict
 #Incase you want to predict only selected properties,
@@ -99,7 +99,15 @@ spectraldata.fin.fin<-spec_trt[is.element(spec_trt$SSN, df.f$SSN),] ## FUSI Stil
 # also removed the columns for char and char type
 
 names(df.f)
-slprptr<-names(df.f[-c(2:4)]) #FUSI EDIT: removing metadata columns 
+slprptr<-names(df.f[-c(2:9)]) #FUSI EDIT: removing metadata columns 
+
+#creating a df with the number of components so I can manually define the
+# nc_df <- data.frame (SSN=slprptr[-1],
+#                        nc=NA)
+# 
+# write.csv(nc_df, paste0(getwd(),"/nc_df.csv"),row.names = F)
+
+nc_df <-read.csv("nc_df.csv")
 
 pred<-as.data.frame(spec_trt[,1])
 colnames(pred)<-"SSN"
@@ -115,12 +123,12 @@ top_loadings_df_pc2  <- NULL
 dir.create("Wavenumbers_vs_Loadings_PLSR_MIR")
 
 
-#FUSI EDIT: started at 3, instead of 2 because the first column in the char type
-for(p in 23:length(slprptr)){
-
+#FUSI EDIT: started at 10 because of metadata
+for(p in 10:length(slprptr)){
 #Select properties to predict one at a time and remove NAs  
 df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
 
+df.sel_ <-subset(df.sel, df.sel[,2]>quantile(df.sel[,2], 0.01)&df.sel[,2] <quantile(df.sel[,2], 0.99))
 
 #Plot and print Biochar properties boxplots
 boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
@@ -146,7 +154,7 @@ ggsave(paste0("Plots_Violinplots_PLSR_MIR/", slprptr[p], ".png"), plot = violin_
 # #Split samples inside loop for variables with many NAs
 # #Set splitting proportion for the calibration and validation data
 set.seed(123)
-pool=df.f[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
+pool=df.sel[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
 pool<-pool[order(pool$SSN),]
 poolid<-pool$SSN
 
@@ -156,20 +164,17 @@ cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
 
 # threshold to exclude the extreme 5% values
 #KARARI UPDATE; 95% loses too many samples, changed to 99% 
+#FUSI UPDATE: this initially used to exclude the high high or low low values from the cal and the val set independently. I think this was leading to really small val datasets sometimes. So I did the exclusion before the split to retain the 70/30 split
 
 cal_df <-subset(cal_df1, cal_df1[,2]>quantile(cal_df1[,2], 0.01)&cal_df1[,2] <quantile(cal_df1[,2], 0.99))
 val_df1 <-subset(df.sel, (df.sel$SSN %in% val_df$SSN))
 val_df <-subset(val_df1, val_df1[,2]>quantile(val_df1[,2], 0.01)&val_df1[,2] <quantile(val_df1[,2], 0.99))
-#FUSI EDIT: first chunk is initial code - for some reason wasn't actually orering the dataframe. second chunk is my edit
-#renames the non-working version with suffice _or
-val_df_or<-val_df[order(rownames(val_df)),]
-cal_df_or<-cal_df[order(rownames(cal_df)),]
 
 val_df<-setorder(val_df)
 cal_df<-setorder(cal_df)
 
- # Check if val_df is empty
-  if (nrow(val_df) > 0) { 
+ # Check if val_df is empty and there are more than 3
+  if (nrow(val_df) > 3) { 
 
 #Subset pre-treated spectra by available reference data
 val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
@@ -188,8 +193,13 @@ Xval.f=val_spec[,-1]
 dfcal.f=cal_df[,-1]
 dfval.f=val_df[,-1]
 
-###### PLSR SOC
-maxc <- 10  ## number of max components
+####
+if (nrow(cal_df) < 25) {
+  maxc <- nrow(cal_df) - 1
+} else {
+  maxc <- 25
+}## number of max components
+
 #FUSI EDIT: max was 25
 pls.md <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp=maxc, validation = "CV", segments = 10)#10-fold CV
 #Each iteration of the cross-validation process involves training the model on 9 of the 10 segments and testing it on the remaining segment, repeating this process 10 times to ensure each segment is used as a test set once.
@@ -202,13 +212,17 @@ png(paste0(getwd(),"/Components_plots_PLSR_MIR/",slprptr[p],".png"))
 print(plot(pls.md, "val", main=slprptr[p]))
 dev.off()
 
-## no. components to use, the one with the smallest adj RMSEP value
-RMSEP.obj<-RMSEP(pls.md)
-str(RMSEP.obj)
+# ## no. components to use, the one with the smallest adj RMSEP value
+# RMSEP.obj<-RMSEP(pls.md)
+# str(RMSEP.obj)
+# 
+# RMSEP.obj$val[1:2,1,]
+# nc <- as.numeric(sub("comps", "", names(which.min(RMSEP.obj$val[1,1,2:dim(RMSEP.obj$val[1:2,1,])[2]]))))
 
-RMSEP.obj$val[1:2,1,]
-nc <- as.numeric(sub("comps", "", names(which.min(RMSEP.obj$val[1,1,2:dim(RMSEP.obj$val[1:2,1,])[2]]))))
-nc
+#FUSI EDIT
+#Mnually selecting the number of components
+
+nc <- nc_df$nc[which(nc_df$SSN == slprptr[p])]
 
 #Generate relevant model name
 md.nm<-paste0("pls.md.", slprptr[p], ".nc", nc)
@@ -287,9 +301,6 @@ colnames(df.prd)<-c("SSN",slprptr[p])
 pred<-merge(pred, df.prd, by="SSN", all.x = T)
 
 
-  } else {
-    print(paste("Skipping testing parameter:", slprptr[p], "because val_df is empty."))
-  }
 
 #FUSI EDIT: extracting top loadings
 
@@ -335,6 +346,10 @@ colnames(df_pc2) <- paste0("Loading_", 1:ncol(df_pc2))
   top_loadings_df_pc2 <- bind_rows(top_loadings_df_pc2, bind_cols(df_pc2_var, df_pc2))
 
 
+  
+  } else {
+    print(paste("Skipping testing parameter:", slprptr[p], "because val_df is empty."))
+  }
 }
 #FUSI EDIT: End of for loop
 
@@ -347,6 +362,8 @@ colnames(df_pc2) <- paste0("Loading_", 1:ncol(df_pc2))
 write.csv(top_loadings_df_pc1, paste0(getwd(),"/top_loadings_df_pc1_PLSR_MIR.csv"),row.names = F)
 write.csv(top_loadings_df_pc2, paste0(getwd(),"/top_loadings_df_pc2_PLSR_MIR.csv"),row.names = F)
 ```
+
+## Plotting properties with threshold metrics
 
 ```{r}
 
@@ -366,27 +383,22 @@ saveRDS(mdl.stats_PLSR_MIR,"mdl.stats_PLSR_MIR.RDS")
 
 ```{r}
 
+#Select only properties with R2 without NA's
 
-mdl.stats_PLSR_MIR <- readRDS("mdl.stats_PLSR_MIR.RDS")
-
-# Filter out rows with missing R2 values
 mdl.stats_filtered <- mdl.stats_PLSR_MIR[complete.cases(mdl.stats_PLSR_MIR$R2), ]
 
-# Order the properties based on R2 values in descending order for _cal data
-ordered_props_cal <- mdl.stats_filtered[mdl.stats_filtered$Data_Type == "_cal", ]
-ordered_props_cal <- ordered_props_cal[order(-ordered_props_cal$R2), "Property_Name"]
-top_properties_cal <- head(ordered_props_cal, 10)
+# Filter the dataframe based on the conditions
 
-# Filter the original dataframe for the selected top properties and both _cal and _val data
-mdl.stats_top <- mdl.stats_filtered[mdl.stats_filtered$Property_Name %in% top_properties_cal, ]
-
-# Create a new factor variable to control the order of bars
-mdl.stats_top$Property_Name <- factor(mdl.stats_top$Property_Name, levels = top_properties_cal)
+# Group by Property_Name and filter for those with R2 > 0.6 for both _cal and _val
+mdl.stats_filtered_0_6 <- mdl.stats_filtered %>%
+  group_by(Property_Name) %>%
+  filter(!any(is.na(R2) & Data_Type %in% c("_cal", "_val"))) %>%
+  filter(all(R2 > 0.6 & Data_Type %in% c("_cal", "_val")))
 
 # Plotting
-cal_val_top_plot <- ggplot(mdl.stats_top, aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
+cal_val_top_plot <- ggplot(mdl.stats_filtered_0_6, aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
   geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
-  labs(title = "Top Properties with Highest R2 for PLSR MIR",
+  labs(title = "Top Properties with R2 of cal & val > 0.6 PLSR MIR",
        x = "Property",
        y = "R2") +
   theme_minimal() +
@@ -401,9 +413,8 @@ ggsave(paste0(getwd(), "/cal_val_PLSR_MIR", ".png"),
        dpi = 300)
 
 
-
 # Extract relevant columns for the top properties and both _cal and _val data
-mdl.stats_table <- mdl.stats_filtered[mdl.stats_filtered$Property_Name %in% top_properties_cal, c("Property_Name", "Data_Type","R2", "RPIQ", "RMSE", "bias", "N")]
+mdl.stats_table <- mdl.stats_filtered_0_6[mdl.stats_filtered_0_6$Property_Name %in% mdl.stats_filtered_0_6, c("Property_Name", "Data_Type","R2", "RPIQ", "RMSE", "bias", "N")]
 
 # Create a new factor variable to control the order of rows in the table
 mdl.stats_table$Property_Name <- factor(mdl.stats_table$Property_Name, levels = top_properties_cal)
@@ -420,9 +431,7 @@ mdl.stats_table_wide <- mdl.stats_table %>%
     values_from = c("R2","RPIQ", "RMSE", "bias", "N"),
     names_sep = "_"
   )
-
 # Save the table to a CSV file
 write.csv(mdl.stats_table, paste0(getwd(), "/Top_Properties_Stats_PLSR_MIR.csv"), row.names = FALSE)
-```
 
-## 
+```

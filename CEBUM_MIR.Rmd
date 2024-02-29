@@ -755,8 +755,8 @@ colnames(df1)[1]<-"SSN"
 
 # #Remove unwanted characters in the data
 # df.f[sapply(df.f, grepl, pattern = "<")] <- "NA"
-dnmrc <- df1[,-c(1:8)] %>% mutate_if(is.character, as.numeric)
-df1 <- bind_cols(df1[,c(1:8)],dnmrc)
+dnmrc <- df1[,-c(1:9)] %>% mutate_if(is.character, as.numeric)
+df1 <- bind_cols(df1[,c(1:9)],dnmrc)
 
 #FUSI EDIT - errors out becauseo of duplicated? REVISIT
 #Revisited - added back after selecting only the samples with ref data 

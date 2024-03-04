@@ -37,28 +37,28 @@ QUESTION:
 Loading libraries
 
 ```{r, warning=FALSE}
-##################### Random Forest Modelling #################################
-library(randomForest)
-library(caret)
-library(pls)
-library(data.table)
+
 #If package ithir is not available for your version of R
 #Use the 3 below lines to install package ithir
 # install.packages("devtools") 
 # library(devtools)
 # install_bitbucket("brendo1001/ithir/pkg") or devtools::install_bitbucket("brendo1001/ithir/pkg")
 
-library(ithir)
-#used to extract model statistics like RMSE etc.
+#ithir used to extract model statistics like RMSE etc.
 #using a function called: goof: see here: https://rdrr.io/rforge/ithir/src/R/goof.R 
-library(data.table)
-library(dplyr)
-library(tidyr)
-library(prospectr)
-library (globals)
-library(stringr)
-library(ggplot2)
-library(here)
+
+# Define a list of required packages
+required_packages <- c("randomForest", "caret", "pls", "data.table", "ithir", 
+                       "dplyr", "tidyr", "prospectr", "globals", "stringr", 
+                       "ggplot2", "here")
+
+# Load packages if they are not already loaded
+lapply(required_packages, function(pkg) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+  library(pkg, character.only = TRUE)
+})
 
 ```
 
@@ -414,13 +414,14 @@ ggsave(paste0(getwd(), "/cal_val_PLSR_MIR", ".png"),
 
 
 # Extract relevant columns for the top properties and both _cal and _val data
-mdl.stats_table <- mdl.stats_filtered_0_6[mdl.stats_filtered_0_6$Property_Name %in% mdl.stats_filtered_0_6, c("Property_Name", "Data_Type","R2", "RPIQ", "RMSE", "bias", "N")]
+mdl.stats_table <- mdl.stats_filtered_0_6[, c("Property_Name", "Data_Type","R2", "RPIQ", "RMSE", "bias", "N")]
 
 # Create a new factor variable to control the order of rows in the table
-mdl.stats_table$Property_Name <- factor(mdl.stats_table$Property_Name, levels = top_properties_cal)
+#mdl.stats_table$Property_Name <- factor(mdl.stats_table$Property_Name, levels = top_properties_cal)  
 
 # Order the rows based on Property_Name and Data_Type
-mdl.stats_table <- mdl.stats_table[order(mdl.stats_table$Property_Name, mdl.stats_table$Data_Type), ]
+mdl.stats_table <- mdl.stats_table[order(mdl.stats_table$Property_Name, mdl.stats_table$Data_Type), ] %>%
+  arrange(desc(R2))
 
 
 # Create a table with the top properties, both _cal and _val data

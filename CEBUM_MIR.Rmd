@@ -216,7 +216,6 @@ avg_spec <- spec.m %>%
   group_by(SSN, variable) %>%
   summarise(value = mean(value, na.rm = TRUE))
 
-
 # Cast the melted data back to wide format
 raw0 <- dcast(avg_spec, SSN ~ variable, value.var = "value")
 
@@ -586,6 +585,15 @@ sp
 
 ggsave(filename  = "./Biochar_scores_MIR.png", height = 6, width = 6,sp)
   
+```
+
+```{r}
+
+ggbiplot::ggbiplot(pcs,
+         obs.scale = 1,
+                 var.scale = 1,
+                 #groups = spec_ref1[[paste0(col_name, "_Factor")]],
+                 var.axes = FALSE)
 ```
 
 ```{r}

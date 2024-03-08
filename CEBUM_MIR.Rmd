@@ -749,7 +749,7 @@ spec_trt <- spec_trt[,-2] #removing the data for the first wavenumber since it's
 #  names(spectraldata)[1] <- "SSN"
 
 #Read reference data
-df1=read.csv("CEBUM_Reference_Data.csv")#, skip=5)#[,c(1,8:29)]
+df1=read.csv("/Users/soliverchefusi/Library/CloudStorage/OneDrive-Personal/R/ICRAF&Lehmann/ICRAF_IR/ICRAF_IR_R_Project/ICRAF_IR/CEBUM/CEBUM_Reference_Data.csv")#, skip=5)#[,c(1,8:29)]
 
 #TEMPORARY, UNTIL I RECIEVE THE REMAINING DATA 
 #df1<-df1[c(1:84),-c(5:24)]
@@ -763,7 +763,10 @@ colnames(df1)[1]<-"SSN"
 
 # #Remove unwanted characters in the data
 # df.f[sapply(df.f, grepl, pattern = "<")] <- "NA"
-dnmrc <- df1[,-c(1:9)] %>% mutate_if(is.character, as.numeric)
+dnmrc <- df1[,-c(1:9)] %>% 
+  mutate_if(is.character, as.numeric) %>%
+  mutate_all(~ifelse(. < 0, 0.00001, .)) # Replace negative values with low value
+
 df1 <- bind_cols(df1[,c(1:9)],dnmrc)
 
 #FUSI EDIT - errors out becauseo of duplicated? REVISIT
@@ -831,6 +834,7 @@ summary_stats <- skim(df.f[,-c(1:7)])
 
 # Remove "numeric." prefix from column names
 colnames(summary_stats) <- sub("numeric\\.", "", colnames(summary_stats))
+summary_stats$n_sample <- nrow(df.f)-summary_stats$n_missing
 
 # Remove some columns
 summary_stats <- subset(summary_stats, select = -c(hist,skim_type))

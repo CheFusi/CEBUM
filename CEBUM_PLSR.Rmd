@@ -13,7 +13,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ## PLS Model
 
 ---
-title: "05CalibrationModels_PLS_Loop_ARC"
+title: "05CalibrationModels_PLS_Loop_ARCslope "
 output: html_document
 date: "2023-07-30"
 ---
@@ -22,13 +22,13 @@ date: "2023-07-30"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-\_ two ways of doing predictions (1) with an existing model that was built some time ago and (2) in this case when you have the spectral and wet chem data and you have to develop the model
+two ways of doing predictions (1) with an existing model that was built some time ago and (2) in this case when you have the spectral and wet chem data and you have to develop the model
 
 Reference data = wet chemistry data of the full 100 samples (being used to develop the model)
 
 QUESTION:
 
--   What does this portion of the code do?: spectraldata.fin\<-spectraldata[is.element(spectraldata\$SSN, df.f\$SSN),]
+-   What does this portion of the code do?: spectraldata.fin -spectraldata[is.element(spectraldata\$SSN, df.f\$SSN),]
 
 -   assuming the file spectral data is reading is referring to the selected samples from section 03?
 
@@ -124,7 +124,8 @@ dir.create("Wavenumbers_vs_Loadings_PLSR_MIR")
 
 
 #FUSI EDIT: started at 10 because of metadata
-for(p in 10:length(slprptr)){
+for(p in 105:length(slprptr)){
+#for(p in c(107)){
 #Select properties to predict one at a time and remove NAs  
 df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
 
@@ -166,9 +167,9 @@ cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
 #KARARI UPDATE; 95% loses too many samples, changed to 99% 
 #FUSI UPDATE: this initially used to exclude the high high or low low values from the cal and the val set independently. I think this was leading to really small val datasets sometimes. So I did the exclusion before the split to retain the 70/30 split
 
-cal_df <-subset(cal_df1, cal_df1[,2]>quantile(cal_df1[,2], 0.01)&cal_df1[,2] <quantile(cal_df1[,2], 0.99))
+cal_df <-subset(cal_df1, cal_df1[,2]>quantile(cal_df1[,2], 0.10)&cal_df1[,2] <quantile(cal_df1[,2], 0.90))
 val_df1 <-subset(df.sel, (df.sel$SSN %in% val_df$SSN))
-val_df <-subset(val_df1, val_df1[,2]>quantile(val_df1[,2], 0.01)&val_df1[,2] <quantile(val_df1[,2], 0.99))
+val_df <-subset(val_df1, val_df1[,2]>quantile(val_df1[,2], 0.10)&val_df1[,2] <quantile(val_df1[,2], 0.90))
 
 val_df<-setorder(val_df)
 cal_df<-setorder(cal_df)
@@ -381,10 +382,13 @@ getwd()
 saveRDS(mdl.stats_PLSR_MIR,"mdl.stats_PLSR_MIR.RDS")
 ```
 
+### Plotting 'High Performing' Samples
+
 ```{r}
 
 #Select only properties with R2 without NA's
 
+mdl.stats_PLSR_MIR <- readRDS("mdl.stats_PLSR_MIR.RDS")
 mdl.stats_filtered <- mdl.stats_PLSR_MIR[complete.cases(mdl.stats_PLSR_MIR$R2), ]
 
 # Filter the dataframe based on the conditions
@@ -395,15 +399,32 @@ mdl.stats_filtered_0_6 <- mdl.stats_filtered %>%
   filter(!any(is.na(R2) & Data_Type %in% c("_cal", "_val"))) %>%
   filter(all(R2 > 0.6 & Data_Type %in% c("_cal", "_val")))
 
+
+# Define a custom color palette
+my_palette <- c("#FF5733", "#FFC300")
+
 # Plotting
-cal_val_top_plot <- ggplot(mdl.stats_filtered_0_6, aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
+cal_val_top_plot <-ggplot(mdl.stats_filtered_0_6 , aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
   geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
-  labs(title = "Top Properties with R2 of cal & val > 0.6 PLSR MIR",
+  geom_text(aes(label = N), position = position_dodge(width = 0.8), vjust = -0.5, size = 2, color = "black") +  # Add text labels for N
+  labs(title = "Properties with R2 of cal & val > 0.6 PLSR MIR",
        x = "Property",
        y = "R2") +
+  scale_fill_manual(values = my_palette, name = "Data Type", labels = c("Cal", "Val")) +  # Manual fill scale
+  guides(fill = guide_legend(override.aes = list(size = 5, color = "black", label = c("Cal (N)", "Val (N)")))) +  # Customize legend
   theme_minimal() +
-   theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels by 45 degrees
-
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.background = element_rect(fill = "white"),  # Change plot background color
+        legend.position = "right",  # Move legend to the right
+        legend.text = element_text(size = 12),  # Adjust legend text size
+        legend.key = element_rect(fill = my_palette, color = "black"),  # Customize legend key colors
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Center the title
+        panel.border = element_rect(color = "black", fill = NA, size = 1),  # Add a border around the plot area
+        panel.grid.major = element_blank(),  # Remove major gridlines
+        panel.grid.minor = element_blank(),  # Remove minor gridlines
+        axis.line = element_line(color = "black"),  # Add axis lines
+        axis.title = element_text(size = 14),  # Adjust axis title font size
+        axis.text = element_text(size = 12))  # Adjust axis text siz
 # Save the plot
 ggsave(paste0(getwd(), "/cal_val_PLSR_MIR", ".png"),
        plot = cal_val_top_plot,
@@ -435,4 +456,153 @@ mdl.stats_table_wide <- mdl.stats_table %>%
 # Save the table to a CSV file
 write.csv(mdl.stats_table, paste0(getwd(), "/Top_Properties_Stats_PLSR_MIR.csv"), row.names = FALSE)
 
+```
+
+### Plotting Manually Selected Samples
+
+IBI Basic Utility Properties
+
+```{r}
+
+# Group by Property_Name and filter for those with R2 > 0.6 for both _cal and _val
+mdl.stats_filtered_basic <- mdl.stats_filtered %>%
+  group_by(Property_Name) %>%
+  filter(!any(is.na(R2) & Data_Type %in% c("_cal", "_val"))) %>%
+   filter(Property_Name %in% c( "Moisture_105avg","Corg_.w.w.","Htot_to_Corg_.molar.", "Ash_avg", "N_tot_avg", "pH","EC_.uS."))
+
+# Create the plot
+# Define the desired order of Property_Name
+desired_order <- c("Moisture_105avg", "Corg_.w.w.", "Htot_to_Corg_.molar.", "Ash_avg", "N_tot_avg", "pH", "EC_.uS.")
+
+# Convert Property_Name to factor with desired order
+mdl.stats_filtered_basic $Property_Name <- factor(mdl.stats_filtered_basic $Property_Name, levels = desired_order)
+
+
+# Define a custom color palette
+my_palette <- c("#FF5733", "#FFC300")
+
+# Create the plot
+cal_val_basic_util_plot <-  ggplot(mdl.stats_filtered_basic , aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = N), position = position_dodge(width = 0.8), vjust = -0.5, size = 2, color = "black") +  # Add text labels for N
+  labs(title = "International Biochar Initiative Basic Utility Requirements",
+       x = "Property",
+       y = "R2") +
+  scale_fill_manual(values = my_palette, name = "Data Type", labels = c("Cal", "Val")) +  # Manual fill scale
+  guides(fill = guide_legend(override.aes = list(size = 5, color = "black", label = c("Cal (N)", "Val (N)")))) +  # Customize legend
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.background = element_rect(fill = "white"),  # Change plot background color
+        legend.position = "right",  # Move legend to the right
+        legend.text = element_text(size = 12),  # Adjust legend text size
+        legend.key = element_rect(fill = my_palette, color = "black"),  # Customize legend key colors
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Center the title
+        panel.border = element_rect(color = "black", fill = NA, size = 1),  # Add a border around the plot area
+        panel.grid.major = element_blank(),  # Remove major gridlines
+        panel.grid.minor = element_blank(),  # Remove minor gridlines
+        axis.line = element_line(color = "black"),  # Add axis lines
+        axis.title = element_text(size = 14),  # Adjust axis title font size
+        axis.text = element_text(size = 12))  # Adjust axis text size
+cal_val_basic_util_plot
+
+ggsave(paste0(getwd(),"/cal_val_basic_util_plot.png"))
+
+```
+
+Basic Utility Proxy N
+
+```{r}
+
+
+# Group by Property_Name and filter for those with R2 > 0.6 for both _cal and _val
+mdl.stats_filtered_basic_proxy <- mdl.stats_filtered %>%
+  group_by(Property_Name) %>%
+  filter(!any(is.na(R2) & Data_Type %in% c("_cal", "_val"))) %>%
+   filter(Property_Name %in% c("N_tot_avg","Corg_to_N_.w.w." ))
+
+                                #"C_tot_avg", "H_tot_.w.w.","N_tot_avg","O_ult","pH", "Ash_avg", "CEC_.mmol.kg.","Mg_.mg.kg.")) 
+                                
+                                #"Oc_.Al_Si_Fe_Ca.","Corg_.w.w.","Htot_to_Ctot_.molar.","Oult_to_Ctot_.molar.","C_tot_to_N_.w.w.","Corg_to_N_.w.w."))
+
+# Create the plot
+# Define the desired order of Property_Name
+desired_order <- c("N_tot_avg","Corg_to_N_.w.w.")
+
+# Convert Property_Name to factor with desired order
+mdl.stats_filtered_basic_proxy $Property_Name <- factor(mdl.stats_filtered_basic_proxy $Property_Name, levels = desired_order)
+
+
+# Define a custom color palette
+my_palette <- c("#FF5733", "#FFC300")
+
+# Create the plot
+cal_val_basic_proxy_plot <-  ggplot(mdl.stats_filtered_basic_proxy , aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = N), position = position_dodge(width = 0.8), vjust = -0.5, size = 2, color = "black") +  # Add text labels for N
+  labs(title = "",
+       x = "Property",
+       y = "R2") +
+  scale_fill_manual(values = my_palette, name = "Data Type", labels = c("Cal", "Val")) +  # Manual fill scale
+  guides(fill = guide_legend(override.aes = list(size = 5, color = "black", label = c("Cal (N)", "Val (N)")))) +  # Customize legend
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.background = element_rect(fill = "white"),  # Change plot background color
+        legend.position = "right",  # Move legend to the right
+        legend.text = element_text(size = 12),  # Adjust legend text size
+        legend.key = element_rect(fill = my_palette, color = "black"),  # Customize legend key colors
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Center the title
+        panel.border = element_rect(color = "black", fill = NA, size = 1),  # Add a border around the plot area
+        panel.grid.major = element_blank(),  # Remove major gridlines
+        panel.grid.minor = element_blank(),  # Remove minor gridlines
+        axis.line = element_line(color = "black"),  # Add axis lines
+        axis.title = element_text(size = 14),  # Adjust axis title font size
+        axis.text = element_text(size = 12))  # Adjust axis text size
+cal_val_basic_proxy_plot
+
+ggsave(paste0(getwd(),"/cal_val_basic_util_N_plot.png"))
+```
+
+```{r}
+
+
+# Group by Property_Name and filter for those with R2 > 0.6 for both _cal and _val
+mdl.stats_filtered_basic_proxy <- mdl.stats_filtered %>%
+  group_by(Property_Name) %>%
+  filter(!any(is.na(R2) & Data_Type %in% c("_cal", "_val"))) %>%
+   filter(Property_Name %in% c("C_tot_avg","mg.CaCO3.O.kg.char"))
+
+desired_order <- c("C_tot_avg","mg.CaCO3.O.kg.char")
+
+# Convert Property_Name to factor with desired order
+mdl.stats_filtered_basic_proxy $Property_Name <- factor(mdl.stats_filtered_basic_proxy $Property_Name, levels = desired_order)
+
+
+# Define a custom color palette
+my_palette <- c("#FF5733", "#FFC300")
+
+# Create the plot
+cal_val_basic_C_plot <-  ggplot(mdl.stats_filtered_basic_proxy , aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = N), position = position_dodge(width = 0.8), vjust = -0.5, size = 2, color = "black") +  # Add text labels for N
+  labs(title = "",
+       x = "Property",
+       y = "R2") +
+  scale_fill_manual(values = my_palette, name = "Data Type", labels = c("Cal", "Val")) +  # Manual fill scale
+  guides(fill = guide_legend(override.aes = list(size = 5, color = "black", label = c("Cal (N)", "Val (N)")))) +  # Customize legend
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.background = element_rect(fill = "white"),  # Change plot background color
+        legend.position = "right",  # Move legend to the right
+        legend.text = element_text(size = 12),  # Adjust legend text size
+        legend.key = element_rect(fill = my_palette, color = "black"),  # Customize legend key colors
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Center the title
+        panel.border = element_rect(color = "black", fill = NA, size = 1),  # Add a border around the plot area
+        panel.grid.major = element_blank(),  # Remove major gridlines
+        panel.grid.minor = element_blank(),  # Remove minor gridlines
+        axis.line = element_line(color = "black"),  # Add axis lines
+        axis.title = element_text(size = 14),  # Adjust axis title font size
+        axis.text = element_text(size = 12))  # Adjust axis text size
+cal_val_basic_C_plot
+
+ggsave(paste0(getwd(),"/cal_val_basic_C_plot.png"))
 ```

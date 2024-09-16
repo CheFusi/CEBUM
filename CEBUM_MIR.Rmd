@@ -216,6 +216,7 @@ avg_spec <- spec.m %>%
   group_by(SSN, variable) %>%
   summarise(value = mean(value, na.rm = TRUE))
 
+
 # Cast the melted data back to wide format
 raw0 <- dcast(avg_spec, SSN ~ variable, value.var = "value")
 
@@ -279,6 +280,8 @@ wavenumbers <- round(as.numeric(substr(colnames(nwraw0[,-1]),2,100)),1)
 
 colnames(nwraw0) <- c("SSN", wavenumbers)
 
+saveRDS(nwraw0,"nwraw0.RDS")
+
 #FUSI EDIT: also removed bands below 650 as per Lago
 
 ##################################### Spectra pre-treatment ###################
@@ -321,6 +324,13 @@ spec_trt<-bind_cols(SSN=nwraw0$SSN,spec_der.mc_trt)
 
 saveRDS(spec_trt,"spec_trt_MIR.RDS")
  
+```
+
+## Aside: Berkeley Biochars
+
+```{r}
+
+
 ```
 
 ### Plot of pretreted spectral (w/ Outliers)

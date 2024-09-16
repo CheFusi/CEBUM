@@ -59,6 +59,7 @@ pred<-as.data.frame(spec_trt[,1])
 colnames(pred)<-"SSN"
 
 mdl.stats<-NULL#Model stats container
+
 top_loadings_df_pc1 <- NULL
 top_loadings_df_pc2 <- NULL
 
@@ -67,6 +68,8 @@ for(p in 23:length(slprptr)){
 #Select properties to predict one at a time and remove NAs  
 df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
 
+  if (nrow(df.sel) > 0) {
+    
 #Plot and print Biochar properties boxplots
 boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
 dir.create("Plots_Boxplots_RF_MIR")
@@ -98,7 +101,7 @@ cal_df_or<-cal_df[order(rownames(cal_df)),]
 val_df<-setorder(val_df)
 cal_df<-setorder(cal_df)
 
-
+   if (nrow(val_df) > 3 && nrow(cal_df) > 3) {  # Ensure there are sufficient data points
 #Subset pre-treated spectra by available reference data
 val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
 cal_spec<-spec_trt[is.element(spec_trt$SSN, cal_df$SSN),]
@@ -190,39 +193,64 @@ colnames(df.prd)<-c("SSN",slprptr[p])
 
 pred<-merge(pred,df.prd,by="SSN", all.x = T)
 
-
-#FUSI EDIT: extracting top loadings
-
-  # Extract loadings
-  loadings <- pls.md$loadings
-  
-  # Identify the top loaded variables for each component
-  top_loaded_variables_pc1 <- head(names(sort(abs(loadings[, 1]), decreasing = TRUE)), 30)
-  top_loaded_variables_pc2 <- head(names(sort(abs(loadings[, 2]), decreasing = TRUE)), 30)
-  
-  #remove single quotes
-  top_loaded_variables_pc1<- gsub("`|'", "", top_loaded_variables_pc1)
-  top_loaded_variables_pc2<- gsub("`|'", "", top_loaded_variables_pc2)
-  
-  # plsce them in a dataframe 
-  df_pc1 <- t(data.frame(as.numeric(top_loaded_variables_pc1), stringsAsFactors = FALSE))
-  df_pc2 <- t(data.frame(as.numeric(top_loaded_variables_pc2), stringsAsFactors = FALSE))
-  
-  # Optionally, set the column names
-colnames(df_pc1) <- paste0("Loading_", 1:ncol(df_pc1))
-colnames(df_pc2) <- paste0("Loading_", 1:ncol(df_pc2))
-  
-  # Create data frame for PC1 loadings
-  df_pc1_var <- data.frame(Response_Variable = slprptr[p])
-  
-  # Create data frame for PC2 loadings
-  df_pc2_var <- data.frame(Response_Variable = slprptr[p])
-  
-  # Append data frames to the main data frames
-  top_loadings_df_pc1 <- bind_rows(top_loadings_df_pc1, bind_cols(df_pc1_var, df_pc1))
-  top_loadings_df_pc2 <- bind_rows(top_loadings_df_pc2, bind_cols(df_pc2_var, df_pc2))
+    } else {
+      print(paste("Skipping model fitting for", slprptr[p], "due to insufficient data."))
+    }
+    
+  } else {
+    print(paste("Skipping data processing for", slprptr[p], "due to empty dataset after NA removal."))
+  }
+}
 
 
+```
+
+### Filtering Outlier
+
+```{r}
+
+# Function to apply IQR, MAD, and Z-score filtering in sequence
+filter_outliers <- function(data, variable) {
+  # Step 1: IQR Filtering
+  Q1 <- quantile(data[[variable]], 0.25)
+  Q3 <- quantile(data[[variable]], 0.75)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  filtered_data <- subset(data, data[[variable]] >= lower_bound & data[[variable]] <= upper_bound)
+  
+  print(paste("After IQR filtering, remaining data points:", nrow(filtered_data)))
+  
+  # Assess if further filtering is needed
+  if (nrow(filtered_data) < nrow(data)) {
+    # Step 2: MAD Filtering if significant outliers remain
+    median_value <- median(filtered_data[[variable]])
+    MAD <- mad(filtered_data[[variable]])
+    threshold <- 3 * MAD
+    mad_filtered_data <- subset(filtered_data, abs(filtered_data[[variable]] - median_value) <= threshold)
+    
+    print(paste("After MAD filtering, remaining data points:", nrow(mad_filtered_data)))
+    
+    # Reassess if further filtering is needed
+    if (nrow(mad_filtered_data) < nrow(filtered_data)) {
+      # Step 3: Z-Score Filtering if significant outliers still remain
+      z_scores <- scale(mad_filtered_data[[variable]])
+      z_filtered_data <- subset(mad_filtered_data, abs(z_scores) <= 3)
+      
+      print(paste("After Z-score filtering, remaining data points:", nrow(z_filtered_data)))
+      
+      # Final dataset after all filters
+      return(z_filtered_data)
+    } else {
+      # Return data after MAD filtering
+      print("No significant outliers detected after MAD filtering. No Z-score filtering applied.")
+      return(mad_filtered_data)
+    }
+  } else {
+    # Return data after IQR filtering
+    print("No significant outliers detected after IQR filtering. No further filtering applied.")
+    return(filtered_data)
+  }
 }
 
 
@@ -230,8 +258,199 @@ colnames(df_pc2) <- paste0("Loading_", 1:ncol(df_pc2))
 
 ```{r}
 
-write.csv(top_loadings_df_pc1, paste0(getwd(),"/top_loadings_df_pc1_RF_MIR.csv"),row.names = F)
-write.csv(top_loadings_df_pc2, paste0(getwd(),"/top_loadings_df_pc2_RF_MIR.csv"),row.names = F)
+#Available properties to predict
+#Incase you want to predict only selected properties,
+#get property position by running line 66. Remove hash sign between ")" and "["
+#symbols on line 67. Edit properties position and run line 67.
+#Always ensure position 1 in always included.
+
+names(df.f)
+slprptr <- names(df.f[-c(2:9)]) #FUSI EDIT: removing metadata columns
+
+pred <- as.data.frame(spec_trt[,1])
+colnames(pred) <- "SSN"
+
+mdl.stats <- NULL # Model stats container
+
+#top_loadings_df_pc1 <- NULL
+#top_loadings_df_pc2 <- NULL
+
+for(p in 2:length(slprptr)){
+  
+  # Select properties to predict one at a time and remove NAs  
+  df.sel <- df.f %>% select(SSN, slprptr[p]) %>% na.omit
+  
+  # FUSI EDIT: OMITTING OUTLIERS
+  df.sel <- filter_outliers(df.sel, colnames(df.sel)[2])
+  
+  if (nrow(df.sel) > 0) {
+    # Plot and print Biochar properties boxplots
+    boxplot(df.sel[,slprptr[p]], las = 2, xlab = slprptr[p], ylab = "")
+    dir.create("Plots_Boxplots_RF_MIR", showWarnings = FALSE)
+    png(paste0(getwd(), "/Plots_Boxplots_RF_MIR/", slprptr[p], ".png"))
+    print(boxplot(df.sel[,slprptr[p]], las = 2, xlab = slprptr[p], ylab = ""))
+    dev.off()
+  
+    # Split samples inside loop for variables with many NAs
+    set.seed(123)
+    pool <- df.f[sample(nrow(df.sel), round(0.3 * nrow(df.sel), 0)), ]
+    pool <- pool[order(pool$SSN),]
+    poolid <- pool$SSN
+  
+    # Get calibration and validation datasets
+    val_df <- pool
+    cal_df1 <- subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+  
+    # Threshold to exclude the extreme 5% values
+    cal_df <- subset(cal_df1, cal_df1[, 2] > quantile(cal_df1[, 2], 0.05) & cal_df1[, 2] < quantile(cal_df1[, 2], 0.95))
+    val_df1 <- subset(df.sel, (df.sel$SSN %in% val_df$SSN))
+    val_df <- subset(val_df1, val_df1[, 2] > quantile(val_df1[, 2], 0.05) & val_df1[, 2] < quantile(val_df1[, 2], 0.95))
+  
+    # FUSI EDIT: first chunk is initial code - for some reason wasn't actually ordering the dataframe. 
+    # Second chunk is my edit that renames the non-working version with suffix _or
+    val_df_or <- val_df[order(rownames(val_df)), ]
+    cal_df_or <- cal_df[order(rownames(cal_df)), ]
+  
+    val_df <- setorder(val_df)
+    cal_df <- setorder(cal_df)
+  
+    if (nrow(val_df) > 3 && nrow(cal_df) > 3) {  # Ensure there are sufficient data points
+      # Subset pre-treated spectra by available reference data
+      val_spec <- spec_trt[is.element(spec_trt$SSN, val_df$SSN), ]
+      cal_spec <- spec_trt[is.element(spec_trt$SSN, cal_df$SSN), ]
+      cal_spec <- cal_spec[order(cal_spec$SSN), ]
+      val_spec <- val_spec[order(val_spec$SSN), ]
+  
+      # Get number of calibration and validation datasets
+      N_cal <- nrow(cal_spec)
+      N_val <- nrow(val_spec)
+  
+      # Model data
+      Xcal.f <- cal_spec[, -1]
+      Xval.f <- val_spec[, -1]
+      dfcal.f <- cal_df[, -1]
+      dfval.f <- val_df[, -1]
+  
+      rf.md <- randomForest(Xcal.f, dfcal.f, ntree = 500, mtry = 10, importance = TRUE) #500 10
+  
+      # Generate relevant model name
+      md.nm <- paste("rf.md", slprptr[p], sep = ".")
+  
+      # Rename model with the looped Biochar property
+      assign(x = md.nm, value = get("rf.md", pos = .GlobalEnv), pos = .GlobalEnv)
+  
+      # Predict to validation dataset
+      rf.prd <- predict(rf.md, Xval.f)
+  
+      # Return prediction statistics
+      val.stats <- round(goof(dfval.f, rf.prd, type = "spec"), 3)
+      val.stats <- bind_cols(Property = paste0(Property = slprptr[p], "_val"), N = N_val, val.stats)
+      val.stats
+  
+      # Calibration statistics
+      rf_pc <- predict(rf.md, Xcal.f)
+      rf.cal <- round(goof(dfcal.f, rf_pc, type = "spec"), 3)
+      cal.stats <- bind_cols(Property = paste0(Property = slprptr[p], "_cal"), N = N_cal, rf.cal)
+      cal.stats
+  
+      ################### Get model statistics #########################
+      mdstats <- bind_rows(cal.stats, val.stats)
+  
+      # Create model stats labels for the plot
+      slct.stats <- as.data.frame(t(mdstats[, c("Property", "N", "R2", "RMSE", "bias", "RPIQ")]))
+      names(slct.stats) <- NULL
+      slct.stats <- bind_cols(rownames(slct.stats), slct.stats[, 2])
+      valbls <- paste0(c("N", "R2", "RMSE", "bias", "RPIQ"), "\n")
+      valsts <- paste0(c(slct.stats[2, 2], slct.stats[3, 2], slct.stats[4, 2], slct.stats[5, 2], slct.stats[6, 2]))
+      valstats <- paste(valbls, valsts)
+  
+      # Bind all looped properties model stats
+      mdl.stats <- bind_rows(mdl.stats, mdstats)
+  
+      lgth <- length(sort(dfval.f, decreasing = F))
+  
+      seq.int(sort(dfval.f, decreasing = F)[1], sort(dfval.f, decreasing = F)[lgth], length.out = 4)
+  
+      # Plot validation plot
+      plot(dfval.f, rf.prd, pch = 10,
+           xlab = paste('Measured', names(val_df)[2], sep = "_"),
+           ylab = paste('Predicted', names(val_df)[2], sep = "_"), 
+           xlim = range(c(dfval.f, rf.prd)),
+           ylim = range(c(dfval.f, rf.prd)),
+           mtext(valstats[-1], side = 3, at = c(seq.int(sort(dfval.f, decreasing = F)[1], sort(dfval.f, decreasing = F)[lgth], length.out = 4)))
+      )   ## plot the predicted vs. measured in the validation
+      abline(a = 0, b = 1)
+  
+      dir.create("Plots_Validationplots_RF_MIR", showWarnings = FALSE)
+      png(paste0(getwd(), "/Plots_Validationplots_RF_MIR/", slprptr[p], ".png"))
+      print(plot(dfval.f, rf.prd, pch = 10,
+                 xlab = paste('Measured', names(val_df)[2], sep = "_"),
+                 ylab = paste('Predicted', names(val_df)[2], sep = "_"), 
+                 xlim = range(c(dfval.f, rf.prd)),
+                 ylim = range(c(dfval.f, rf.prd)),
+                 mtext(valstats[-1], side = 3, at = c(seq.int(sort(dfval.f, decreasing = F)[1], sort(dfval.f, decreasing = F)[lgth], length.out = 4)))
+      ))
+      abline(a = 0, b = 1)
+      dev.off()
+  
+      ################### Predict all samples #########################
+      prd.smpls <- predict(rf.md, spec_trt[, -1])
+  
+      prd <- as.data.frame(prd.smpls)
+      df.prd <- bind_cols(SSN = rownames(prd), prd)
+      colnames(df.prd) <- c("SSN", slprptr[p])
+  
+      pred <- merge(pred, df.prd, by = "SSN", all.x = TRUE)
+  
+      # # FUSI EDIT: extracting top loadings
+      # 
+      # # The following block is for PLSR loadings extraction. 
+      # # For Random Forest, typically variable importance would be used instead.
+      # # Extract loadings (assuming this is still relevant to your workflow)
+      # loadings <- pls.md$loadings
+      # 
+      # # Identify the top loaded variables for each component
+      # top_loaded_variables_pc1 <- head(names(sort(abs(loadings[, 1]), decreasing = TRUE)), 30)
+      # top_loaded_variables_pc2 <- head(names(sort(abs(loadings[, 2]), decreasing = TRUE)), 30)
+      # 
+      # # Remove single quotes
+      # top_loaded_variables_pc1 <- gsub("`|'", "", top_loaded_variables_pc1)
+      # top_loaded_variables_pc2 <- gsub("`|'", "", top_loaded_variables_pc2)
+      # 
+      #       # Place them in a dataframe 
+      # df_pc1 <- t(data.frame(as.numeric(top_loaded_variables_pc1), stringsAsFactors = FALSE))
+      # df_pc2 <- t(data.frame(as.numeric(top_loaded_variables_pc2), stringsAsFactors = FALSE))
+      # 
+      # # Optionally, set the column names
+      # colnames(df_pc1) <- paste0("Loading_", 1:ncol(df_pc1))
+      # colnames(df_pc2) <- paste0("Loading_", 1:ncol(df_pc2))
+      # 
+      # # Create data frame for PC1 loadings
+      # df_pc1_var <- data.frame(Response_Variable = slprptr[p])
+      # 
+      # # Create data frame for PC2 loadings
+      # df_pc2_var <- data.frame(Response_Variable = slprptr[p])
+      # 
+      # # Append data frames to the main data frames
+      # top_loadings_df_pc1 <- bind_rows(top_loadings_df_pc1, bind_cols(df_pc1_var, df_pc1))
+      # top_loadings_df_pc2 <- bind_rows(top_loadings_df_pc2, bind_cols(df_pc2_var, df_pc2))
+
+    } else {
+      print(paste("Skipping model fitting for", slprptr[p], "due to insufficient data."))
+    }
+    
+  } else {
+    print(paste("Skipping data processing for", slprptr[p], "due to empty dataset after NA removal."))
+  }
+}
+# End of for loop
+
+```
+
+```{r}
+
+# write.csv(top_loadings_df_pc1, paste0(getwd(),"/top_loadings_df_pc1_RF_MIR.csv"),row.names = F)
+# write.csv(top_loadings_df_pc2, paste0(getwd(),"/top_loadings_df_pc2_RF_MIR.csv"),row.names = F)
 ```
 
 ```{r}
@@ -285,13 +504,34 @@ mdl.stats_top <- mdl.stats_filtered[mdl.stats_filtered$Property_Name %in% top_pr
 mdl.stats_top$Property_Name <- factor(mdl.stats_top$Property_Name, levels = top_properties_cal)
 
 # Plotting
+
+# Define a custom color palette
+my_palette <- c("#FF5733", "#FFC300")
+
+
 cal_val_top_plot <- ggplot(mdl.stats_top, aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
-  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
-  labs(title = "Top Properties with Highest R2 for PLR RF",
+   geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = N), position = position_dodge(width = 0.8), vjust = -0.5, size = 2, color = "black") +  # Add text labels for N
+  labs(title = "Properties with R2 of cal & val > 0.6 RF MIR",
        x = "Property",
        y = "R2") +
-  theme_minimal()+
-   theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels by 45 degrees
+  scale_fill_manual(values = my_palette, name = "Data Type", labels = c("Cal", "Val")) +  # Manual fill scale
+  guides(fill = guide_legend(override.aes = list(size = 5, color = "black", label = c("Cal (N)", "Val (N)")))) +  # Customize legend
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.background = element_rect(fill = "white"),  # Change plot background color
+        legend.position = "right",  # Move legend to the right
+        legend.text = element_text(size = 12),  # Adjust legend text size
+        legend.key = element_rect(fill = my_palette, color = "black"),  # Customize legend key colors
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Center the title
+        panel.border = element_rect(color = "black", fill = NA, size = 1),  # Add a border around the plot area
+        panel.grid.major = element_blank(),  # Remove major gridlines
+        panel.grid.minor = element_blank(),  # Remove minor gridlines
+        axis.line = element_line(color = "black"),  # Add axis lines
+        axis.title = element_text(size = 14),  # Adjust axis title font size
+        axis.text = element_text(size = 12))  # Adjust axis text size
+cal_val_top_plot
+
 
 # Save the plot
 ggsave(paste0(getwd(), "/cal_val_RF_MIR", ".png"),
@@ -326,4 +566,52 @@ mdl.stats_table_wide <- mdl.stats_table %>%
 write.csv(mdl.stats_table, paste0(getwd(), "/Top_Properties_Stats_RF_MIR.csv"), row.names = FALSE)
 ```
 
-### 
+### Plotting Basic Utility Properties IBI
+
+```{r}
+
+
+
+# Group by Property_Name and filter for those with R2 > 0.6 for both _cal and _val
+mdl.stats_filtered_basic <- mdl.stats_filtered %>%
+  group_by(Property_Name) %>%
+  filter(!any(is.na(R2) & Data_Type %in% c("_cal", "_val"))) %>%
+   filter(Property_Name %in% c( "Moisture_105_avg","C_org_wt","Htot_to_C_org_molar", "Ash_avg", "N_tot_avg", "pH","EC_uS", "mg_CaCO3_O_per_kg_char"))
+
+# Create the plot
+# Define the desired order of Property_Name
+desired_order <- c("Moisture_105_avg","C_org_wt","Htot_to_C_org_molar", "Ash_avg", "N_tot_avg", "pH","EC_uS", "mg_CaCO3_O_per_kg_char")
+
+# Convert Property_Name to factor with desired order
+mdl.stats_filtered_basic $Property_Name <- factor(mdl.stats_filtered_basic $Property_Name, levels = desired_order)
+
+
+# Define a custom color palette
+my_palette <- c("#FF5733", "#FFC300")
+
+# Create the plot
+cal_val_basic_util_plot <-  ggplot(mdl.stats_filtered_basic , aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = N), position = position_dodge(width = 0.8), vjust = -0.5, size = 2, color = "black") +  # Add text labels for N
+  labs(title = "International Biochar Initiative Basic Utility Requirements",
+       x = "Property",
+       y = "R2") +
+  scale_fill_manual(values = my_palette, name = "Data Type", labels = c("Cal", "Val")) +  # Manual fill scale
+  guides(fill = guide_legend(override.aes = list(size = 5, color = "black", label = c("Cal (N)", "Val (N)")))) +  # Customize legend
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.background = element_rect(fill = "white"),  # Change plot background color
+        legend.position = "right",  # Move legend to the right
+        legend.text = element_text(size = 12),  # Adjust legend text size
+        legend.key = element_rect(fill = my_palette, color = "black"),  # Customize legend key colors
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Center the title
+        panel.border = element_rect(color = "black", fill = NA, size = 1),  # Add a border around the plot area
+        panel.grid.major = element_blank(),  # Remove major gridlines
+        panel.grid.minor = element_blank(),  # Remove minor gridlines
+        axis.line = element_line(color = "black"),  # Add axis lines
+        axis.title = element_text(size = 14),  # Adjust axis title font size
+        axis.text = element_text(size = 12))  # Adjust axis text size
+cal_val_basic_util_plot
+
+ggsave(paste0(getwd(),"/cal_val_MIR_RF_basic_util_plot.png"))
+```

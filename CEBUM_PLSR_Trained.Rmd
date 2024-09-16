@@ -1,0 +1,1103 @@
+---
+title: "CEBUM_PLSR_Trained"
+output: html_document
+date: "2024-03-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Loading libraries
+
+```{r, warning=FALSE, message=FALSE}
+
+#If package ithir is not available for your version of R
+#Use the 3 below lines to install package ithir
+# install.packages("devtools") 
+# library(devtools)
+# install_bitbucket("brendo1001/ithir/pkg") or 
+devtools::install_bitbucket("brendo1001/ithir/pkg")
+
+#ithir used to extract model statistics like RMSE etc.
+#using a function called: goof: see here: https://rdrr.io/rforge/ithir/src/R/goof.R 
+
+# Define a list of required packages
+required_packages <- c("randomForest", "caret", "pls", "data.table", "ithir", 
+                       "dplyr", "tidyr", "prospectr", "globals", "stringr", 
+                       "ggplot2", "here")
+
+# Load packages if they are not already loaded
+lapply(required_packages, function(pkg) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+  library(pkg, character.only = TRUE)
+})
+
+```
+
+Load Reference data
+
+```{r}
+
+# spectraldata=read.csv("Raw_spectra-MIR.csv")
+spec_trt <- readRDS("spec_trt_MIR.RDS")
+spec_trt <- spec_trt[,-2] #removing the data for the first wavenumber since it's all NAN's
+
+
+df.f<-readRDS("df.f.RDS")
+
+# threshold_na <- 0.95 #for a 95% cut-off
+# 
+# df.f<-
+#   df.f %>% select(where(~mean(is.na(.)) < threshold_na))
+
+spectraldata.fin.fin<-spec_trt[is.element(spec_trt$SSN, df.f$SSN),] ## FUSI Still unclear what this is for. Changed to reference spec_trt
+ 
+```
+
+## Partial Least Squares Regression
+
+### PLSR Model
+
+```{r, warning=FALSE}
+
+#Available properties to predict
+#Incase you want to predict only selected properties,
+#get property position by running line 66. Remove hash sign between ")" and "["
+#symbols on line 67. Edit properties position and run line 67.
+#Always ensure position 1 in always included.
+
+#FUSI EDIT 
+# changed the call to reference df.f and not df1 because df.f has columns removed for samples that don't have enough data 
+# also removed the columns for char and char type
+
+#names(df.f)
+slprptr<-names(df.f[-c(2:9)]) #FUSI EDIT: removing metadata columns 
+
+#creating a df with the number of components so I can manually define the
+# nc_df <- data.frame (SSN=slprptr[-1],
+#                        nc=NA)
+# 
+# write.csv(nc_df, paste0(getwd(),"/nc_df.csv"),row.names = F)
+
+nc_df <-read.csv("nc_df.csv")
+
+pred<-as.data.frame(spec_trt[,1])
+colnames(pred)<-"SSN"
+
+```
+
+Training Model
+
+```{r}
+
+
+mdl.stats<-NULL#Model stats container
+top_loadings_df_pc1 <- NULL
+top_loadings_df_pc2  <- NULL
+
+# Create directory for saving wavenumbers vs. loadings plots
+dir.create("Wavenumbers_vs_Loadings_PLSR_MIR_Train")
+
+
+#FUSI EDIT: started at 10 because of metadata
+for(p in 10:length(slprptr)){
+#for(p in c(107)){
+#p=64
+#Select properties to predict one at a time and remove NAs  
+df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
+
+df.sel_ <-subset(df.sel, df.sel[,2]>quantile(df.sel[,2], 0.05)&df.sel[,2] <quantile(df.sel[,2], 0.95))
+
+#Plot and print Biochar properties boxplots
+boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
+dir.create("Plots_Boxplots_PLSR_MIR_Train")
+png(paste0(getwd(),"/Plots_Boxplots_PLSR_MIR_Train/",slprptr[p],".png"))
+print(boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = ""))
+dev.off()
+
+# Plot and print Biochar properties violin plots
+violin_plot <- ggplot(data = df.sel, aes(x = "", y = !!sym(slprptr[p]))) +
+  geom_violin(fill = "skyblue", color = "blue") +  # Customize fill and border color
+  geom_boxplot(width = 0.1, fill = "white", color = "black") +  # Add box plot for reference
+  labs(x = "", y = slprptr[p]) +  # Customize axis labels
+  coord_flip() +  # Rotate plot by 90 degrees for horizontal orientation
+  theme_minimal() +  # Use a minimal theme
+  theme(axis.text.x = element_blank()) +  # Hide x-axis labels
+  ggtitle(paste("Violin Plot of", slprptr[p]))  # Add plot title
+
+# Save plot as PNG
+ggsave(paste0("Plots_Violinplots_PLSR_MIR_Train/", slprptr[p], ".png"), plot = violin_plot)
+
+
+# #Split samples inside loop for variables with many NAs
+# #Set splitting proportion for the calibration and validation data
+set.seed(123)
+pool=df.sel[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
+pool<-pool[order(pool$SSN),]
+poolid<-pool$SSN
+
+#Get calibration and validation datasets
+val_df<-pool
+cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+
+# threshold to exclude the extreme 5% values
+#KARARI UPDATE; 95% loses too many samples, changed to 99% 
+#FUSI UPDATE: this initially used to exclude the high high or low low values from the cal and the val set independently. I think this was leading to really small val datasets sometimes. So I did the exclusion before the split to retain the 70/30 split
+
+cal_df <-subset(cal_df1, cal_df1[,2]>quantile(cal_df1[,2], 0.10)&cal_df1[,2] <quantile(cal_df1[,2], 0.90))
+val_df1 <-subset(df.sel, (df.sel$SSN %in% val_df$SSN))
+val_df <-subset(val_df1, val_df1[,2]>quantile(val_df1[,2], 0.10)&val_df1[,2] <quantile(val_df1[,2], 0.90))
+
+val_df<-setorder(val_df)
+cal_df<-setorder(cal_df)
+
+ # Check if val_df is empty and there are more than 3
+  if (nrow(val_df) > 3) { 
+
+#Subset pre-treated spectra by available reference data
+val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
+cal_spec<-spec_trt[is.element(spec_trt$SSN, cal_df$SSN),]
+cal_spec<-cal_spec[order(cal_spec$SSN),]
+val_spec<-val_spec[order(val_spec$SSN),]
+
+
+#Get no of calibration and validation datasets
+N_cal<-nrow(cal_spec)
+N_val<-nrow(val_spec)
+
+#Model data
+Xcal.f=cal_spec[,-1]
+Xval.f=val_spec[,-1]
+dfcal.f=cal_df[,-1]
+dfval.f=val_df[,-1]
+
+####
+if (nrow(cal_df) < 25) {
+  maxc <- nrow(cal_df) - 1
+} else {
+  maxc <- 25
+}## number of max components
+
+#FUSI EDIT: max was 25
+
+#pls.md <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp=maxc, validation = "CV", segments = 10)
+
+pls.md <- train(
+  x = Xcal.f,    # Predictor variables (spectral data)
+  y = dfcal.f,   # Response variable (biochar properties)
+  na.action = na.omit,
+  trControl = trainControl(method = "cv", number = 10),  #FUSI EDIT 10-fold cross-validation
+  method = "pls",
+  #tuneLength = 30, #FUSI EDIR
+  metric = "RMSE"  ## Select the best model by the smallest RMSE value
+)
+
+  plot(pls.md)
+  
+  nc = as.numeric(pls.md$bestTune)    ## Select the bestTune model ncomp
+  
+  RMSE.c = pls.md$results[which(pls.md$results$ncomp == nc),]$RMSE
+  R2.c = pls.md$results[which(pls.md$results$ncomp == nc),]$Rsquared
+ # RPD.c = sd(train_resp)/RMSE.c
+ # RPIQ.c = (quantile(train_resp)[4]-quantile(train_resp)[2])/RMSE.c
+
+
+
+# ## plot RMSEP vs. number of components
+# plot(pls.md, "val", main=slprptr[p]) 
+# 
+# dir.create("Components_plots_PLSR_MIR")
+# png(paste0(getwd(),"/Components_plots_PLSR_MIR/",slprptr[p],".png"))
+# print(plot(pls.md, "val", main=slprptr[p]))
+# dev.off()
+
+
+#Generate relevant model name
+md.nm<-paste0("pls.md.", slprptr[p], ".nc", nc)
+
+#Rename model with the looped Biochar property
+assign(x = md.nm, value = get("pls.md", pos = .GlobalEnv), pos = .GlobalEnv)
+
+## predict to validation dataset
+pls.prd <- predict(pls.md, ncomp = nc, newdata = Xval.f)
+
+## Return prediction statistics
+val.stats=round(goof(dfval.f, pls.prd, type = "spec"),3)
+val.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_val"), Comps="", N=N_val, val.stats)
+val.stats
+
+## calibration statistics
+pls.pc <- predict(pls.md, ncomp = nc, newdata = Xcal.f)
+
+pls.cal=round(goof(dfcal.f, pls.pc, type = "spec"),3)
+cal.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_cal"), Comps=as.character(nc), N=N_cal, pls.cal)
+cal.stats
+
+################### Get model statistics #########################
+mdstats<-bind_rows(cal.stats, val.stats)
+
+#Create model stats labels for the plot
+#FUSI EDIT: Removed comps from before N because plot was crowded should add back in and only remove in plot below 
+slct.stats<-as.data.frame(t(mdstats[,c("Property","N","R2","RMSE","bias","RPIQ" )])) 
+names(slct.stats)<-NULL
+slct.stats<-bind_cols(rownames(slct.stats),slct.stats[,2])
+
+#FUSI EDIT: added "comps" because it is in slct.stats 
+valbls<-paste0(c("N","R2","RMSE","bias","RPIQ"), "\n")
+valsts<-paste0(c(slct.stats[2,2],slct.stats[3,2],slct.stats[4,2],slct.stats[5,2],slct.stats[6,2]))
+valstats<-paste(valbls,valsts)
+
+#Bind all looped properties model stats
+mdl.stats<-bind_rows(mdl.stats,mdstats)
+
+
+lgth<-length(sort(dfval.f,decreasing=F))
+
+seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)
+
+#Plot validation plot
+plot(dfval.f,pls.prd,pch=10,
+     xlab=paste('Measured',names(val_df)[2],sep="_"),
+     ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+     xlim = range(c(dfval.f,pls.prd)),
+     ylim = range(c(dfval.f,pls.prd)),
+     mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+     )   ## plot the predicted vs. measured in the validation
+abline(a = 0, b = 1)
+
+
+dir.create("Plots_Validationplots_PLSR_MIR_Train")
+png(paste0(getwd(),"/Plots_Validationplots_PLSR_MIR_Train/",slprptr[p],".png"))
+print(plot(dfval.f,pls.prd,pch=10,
+           xlab=paste('Measured',names(val_df)[2],sep="_"),
+           ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+           xlim = range(c(dfval.f,pls.prd)),
+           ylim = range(c(dfval.f,pls.prd)),
+           mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+           ))
+abline(a = 0, b = 1)
+dev.off()
+
+
+################### Predict all samples #########################
+prd.smpls <- predict(pls.md, spec_trt[,-1])
+
+prd<-as.data.frame(prd.smpls)
+df.prd<-bind_cols(SSN=rownames(spec_trt),prd[,])#[,nc]) #FUSI EDIT previously was refering to an nc colum which doesn't exist for the trained model & changed the rownames to reference spec_trt because it used to reference prd, but prd just had numbers
+colnames(df.prd)<-c("SSN",slprptr[p])
+
+pred<-merge(pred, df.prd, by="SSN", all.x = T)
+
+
+  } else {
+    print(paste("Skipping testing parameter:", slprptr[p], "because val_df is empty."))
+  }
+}
+#FUSI EDIT: End of for loop
+
+
+```
+
+### ATTEMPT: removing outliers dynamically
+
+Define function to filter oulier dynamically
+
+```{r}
+
+# Function to apply IQR, MAD, and Z-score filtering in sequence
+filter_outliers <- function(data, variable) {
+  # Step 1: IQR Filtering
+  Q1 <- quantile(data[[variable]], 0.25)
+  Q3 <- quantile(data[[variable]], 0.75)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  filtered_data <- subset(data, data[[variable]] >= lower_bound & data[[variable]] <= upper_bound)
+  
+  print(paste("After IQR filtering, remaining data points:", nrow(filtered_data)))
+  
+  # Assess if further filtering is needed
+  if (nrow(filtered_data) < nrow(data)) {
+    # Step 2: MAD Filtering if significant outliers remain
+    median_value <- median(filtered_data[[variable]])
+    MAD <- mad(filtered_data[[variable]])
+    threshold <- 3 * MAD
+    mad_filtered_data <- subset(filtered_data, abs(filtered_data[[variable]] - median_value) <= threshold)
+    
+    print(paste("After MAD filtering, remaining data points:", nrow(mad_filtered_data)))
+    
+    # Reassess if further filtering is needed
+    if (nrow(mad_filtered_data) < nrow(filtered_data)) {
+      # Step 3: Z-Score Filtering if significant outliers still remain
+      z_scores <- scale(mad_filtered_data[[variable]])
+      z_filtered_data <- subset(mad_filtered_data, abs(z_scores) <= 3)
+      
+      print(paste("After Z-score filtering, remaining data points:", nrow(z_filtered_data)))
+      
+      # Final dataset after all filters
+      return(z_filtered_data)
+    } else {
+      # Return data after MAD filtering
+      print("No significant outliers detected after MAD filtering. No Z-score filtering applied.")
+      return(mad_filtered_data)
+    }
+  } else {
+    # Return data after IQR filtering
+    print("No significant outliers detected after IQR filtering. No further filtering applied.")
+    return(filtered_data)
+  }
+}
+
+
+```
+
+```{r}
+
+
+mdl.stats<-NULL#Model stats container
+top_loadings_df_pc1 <- NULL
+top_loadings_df_pc2  <- NULL
+
+# Create directory for saving wavenumbers vs. loadings plots
+dir.create("Wavenumbers_vs_Loadings_PLSR_MIR_Train")
+
+
+#FUSI EDIT: started at 10 because of metadata
+for(p in 10:length(slprptr)){
+#for(p in c(107)){
+#p=64
+#Select properties to predict one at a time and remove NAs  
+df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
+
+# Original line using quantile-based filtering
+#df.sel_ <-subset(df.sel, df.sel[,2]>quantile(df.sel[,2], 0.05)&df.sel[,2] <quantile(df.sel[,2], 0.95))
+
+# FUSI edit
+# Replace it with:
+df.sel <- filter_outliers(df.sel, colnames(df.sel)[2])
+
+#Plot and print Biochar properties boxplots
+boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
+dir.create("Plots_Boxplots_PLSR_MIR_Train")
+png(paste0(getwd(),"/Plots_Boxplots_PLSR_MIR_Train/",slprptr[p],".png"))
+print(boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = ""))
+dev.off()
+
+# Plot and print Biochar properties violin plots
+violin_plot <- ggplot(data = df.sel, aes(x = "", y = !!sym(slprptr[p]))) +
+  geom_violin(fill = "skyblue", color = "blue") +  # Customize fill and border color
+  geom_boxplot(width = 0.1, fill = "white", color = "black") +  # Add box plot for reference
+  labs(x = "", y = slprptr[p]) +  # Customize axis labels
+  coord_flip() +  # Rotate plot by 90 degrees for horizontal orientation
+  theme_minimal() +  # Use a minimal theme
+  theme(axis.text.x = element_blank()) +  # Hide x-axis labels
+  ggtitle(paste("Violin Plot of", slprptr[p]))  # Add plot title
+
+# Save plot as PNG
+ggsave(paste0("Plots_Violinplots_PLSR_MIR_Train/", slprptr[p], ".png"), plot = violin_plot)
+
+
+# #Split samples inside loop for variables with many NAs
+# #Set splitting proportion for the calibration and validation data
+set.seed(123)
+pool=df.sel[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
+pool<-pool[order(pool$SSN),]
+poolid<-pool$SSN
+
+#Get calibration and validation datasets
+val_df<-pool
+cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+
+# threshold to exclude the extreme 5% values
+#KARARI UPDATE; 95% loses too many samples, changed to 99% 
+#FUSI UPDATE: this initially used to exclude the high high or low low values from the cal and the val set independently. I think this was leading to really small val datasets sometimes. So I did the exclusion before the split to retain the 70/30 split
+
+cal_df <-subset(cal_df1, cal_df1[,2]>quantile(cal_df1[,2], 0.10)&cal_df1[,2] <quantile(cal_df1[,2], 0.90))
+val_df1 <-subset(df.sel, (df.sel$SSN %in% val_df$SSN))
+val_df <-subset(val_df1, val_df1[,2]>quantile(val_df1[,2], 0.10)&val_df1[,2] <quantile(val_df1[,2], 0.90))
+
+val_df<-setorder(val_df)
+cal_df<-setorder(cal_df)
+
+ # Check if val_df is empty and there are more than 3
+  if (nrow(val_df) > 3) { 
+
+#Subset pre-treated spectra by available reference data
+val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
+cal_spec<-spec_trt[is.element(spec_trt$SSN, cal_df$SSN),]
+cal_spec<-cal_spec[order(cal_spec$SSN),]
+val_spec<-val_spec[order(val_spec$SSN),]
+
+
+#Get no of calibration and validation datasets
+N_cal<-nrow(cal_spec)
+N_val<-nrow(val_spec)
+
+#Model data
+Xcal.f=cal_spec[,-1]
+Xval.f=val_spec[,-1]
+dfcal.f=cal_df[,-1]
+dfval.f=val_df[,-1]
+
+
+pls.md <- train(
+  x = Xcal.f,    # Predictor variables (spectral data)
+  y = dfcal.f,   # Response variable (biochar properties)
+  na.action = na.omit,
+  trControl = trainControl(method = "cv", number = 10),  #FUSI EDIT 10-fold cross-validation
+  method = "pls",
+  #tuneLength = 30, #FUSI EDIR
+  metric = "RMSE",  ## Select the best model by the smallest RMSE value
+  maximize = FALSE #should the metric be maximized or minimized?
+)
+
+  plot(pls.md)
+  
+  nc = as.numeric(pls.md$bestTune)    ## Select the bestTune model ncomp
+  
+  RMSE.c = pls.md$results[which(pls.md$results$ncomp == nc),]$RMSE
+  R2.c = pls.md$results[which(pls.md$results$ncomp == nc),]$Rsquared
+ # RPD.c = sd(train_resp)/RMSE.c
+ # RPIQ.c = (quantile(train_resp)[4]-quantile(train_resp)[2])/RMSE.c
+
+
+
+# ## plot RMSEP vs. number of components
+# plot(pls.md, "val", main=slprptr[p]) 
+# 
+# dir.create("Components_plots_PLSR_MIR")
+# png(paste0(getwd(),"/Components_plots_PLSR_MIR/",slprptr[p],".png"))
+# print(plot(pls.md, "val", main=slprptr[p]))
+# dev.off()
+
+
+#Generate relevant model name
+md.nm<-paste0("pls.md.", slprptr[p], ".nc", nc)
+
+#Rename model with the looped Biochar property
+assign(x = md.nm, value = get("pls.md", pos = .GlobalEnv), pos = .GlobalEnv)
+
+## predict to validation dataset
+pls.prd <- predict(pls.md, ncomp = nc, newdata = Xval.f)
+
+## Return prediction statistics
+val.stats=round(goof(dfval.f, pls.prd, type = "spec"),3)
+val.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_val"), Comps="", N=N_val, val.stats)
+val.stats
+
+## calibration statistics
+pls.pc <- predict(pls.md, ncomp = nc, newdata = Xcal.f)
+
+pls.cal=round(goof(dfcal.f, pls.pc, type = "spec"),3)
+cal.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_cal"), Comps=as.character(nc), N=N_cal, pls.cal)
+cal.stats
+
+################### Get model statistics #########################
+mdstats<-bind_rows(cal.stats, val.stats)
+
+#Create model stats labels for the plot
+#FUSI EDIT: Removed comps from before N because plot was crowded should add back in and only remove in plot below 
+slct.stats<-as.data.frame(t(mdstats[,c("Property","N","R2","RMSE","bias","RPIQ" )])) 
+names(slct.stats)<-NULL
+slct.stats<-bind_cols(rownames(slct.stats),slct.stats[,2])
+
+#FUSI EDIT: added "comps" because it is in slct.stats 
+valbls<-paste0(c("N","R2","RMSE","bias","RPIQ"), "\n")
+valsts<-paste0(c(slct.stats[2,2],slct.stats[3,2],slct.stats[4,2],slct.stats[5,2],slct.stats[6,2]))
+valstats<-paste(valbls,valsts)
+
+#Bind all looped properties model stats
+mdl.stats<-bind_rows(mdl.stats,mdstats)
+
+
+lgth<-length(sort(dfval.f,decreasing=F))
+
+seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)
+
+#Plot validation plot
+plot(dfval.f,pls.prd,pch=10,
+     xlab=paste('Measured',names(val_df)[2],sep="_"),
+     ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+     xlim = range(c(dfval.f,pls.prd)),
+     ylim = range(c(dfval.f,pls.prd)),
+     mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+     )   ## plot the predicted vs. measured in the validation
+abline(a = 0, b = 1)
+
+
+dir.create("Plots_Validationplots_PLSR_MIR_Train")
+png(paste0(getwd(),"/Plots_Validationplots_PLSR_MIR_Train/",slprptr[p],".png"))
+print(plot(dfval.f,pls.prd,pch=10,
+           xlab=paste('Measured',names(val_df)[2],sep="_"),
+           ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+           xlim = range(c(dfval.f,pls.prd)),
+           ylim = range(c(dfval.f,pls.prd)),
+           mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+           ))
+abline(a = 0, b = 1)
+dev.off()
+
+
+################### Predict all samples #########################
+prd.smpls <- predict(pls.md, spec_trt[,-1])
+
+prd<-as.data.frame(prd.smpls)
+df.prd<-bind_cols(SSN=rownames(spec_trt),prd[,])#[,nc]) #FUSI EDIT previously was refering to an nc colum which doesn't exist for the trained model & changed the rownames to reference spec_trt because it used to reference prd, but prd just had numbers
+colnames(df.prd)<-c("SSN",slprptr[p])
+
+pred<-merge(pred, df.prd, by="SSN", all.x = T)
+
+
+  } else {
+    print(paste("Skipping testing parameter:", slprptr[p], "because val_df is empty."))
+  }
+}
+#FUSI EDIT: End of for loop
+
+
+```
+
+### Training based on retaining 90% Variance
+
+### n Felix Suggestion)
+
+### (Rya
+
+```{r}
+
+mdl.stats<-NULL#Model stats container
+top_loadings_df_pc1 <- NULL
+top_loadings_df_pc2  <- NULL
+
+# Create directory for saving wavenumbers vs. loadings plots
+dir.create("Wavenumbers_vs_Loadings_PLSR_MIR_Train")
+
+
+#FUSI EDIT: started at 10 because of metadata
+for(p in 10:length(slprptr)){
+#for(p in c(107)){
+#p=64
+#Select properties to predict one at a time and remove NAs  
+df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
+
+# Original line using quantile-based filtering
+#df.sel_ <-subset(df.sel, df.sel[,2]>quantile(df.sel[,2], 0.05)&df.sel[,2] <quantile(df.sel[,2], 0.95))
+
+# FUSI edit
+# Replace it with:
+df.sel <- filter_outliers(df.sel, colnames(df.sel)[2])
+
+#Plot and print Biochar properties boxplots
+boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
+dir.create("Plots_Boxplots_PLSR_MIR_Train")
+png(paste0(getwd(),"/Plots_Boxplots_PLSR_MIR_Train/",slprptr[p],".png"))
+print(boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = ""))
+dev.off()
+
+# Plot and print Biochar properties violin plots
+violin_plot <- ggplot(data = df.sel, aes(x = "", y = !!sym(slprptr[p]))) +
+  geom_violin(fill = "skyblue", color = "blue") +  # Customize fill and border color
+  geom_boxplot(width = 0.1, fill = "white", color = "black") +  # Add box plot for reference
+  labs(x = "", y = slprptr[p]) +  # Customize axis labels
+  coord_flip() +  # Rotate plot by 90 degrees for horizontal orientation
+  theme_minimal() +  # Use a minimal theme
+  theme(axis.text.x = element_blank()) +  # Hide x-axis labels
+  ggtitle(paste("Violin Plot of", slprptr[p]))  # Add plot title
+
+# Save plot as PNG
+ggsave(paste0("Plots_Violinplots_PLSR_MIR_Train/", slprptr[p], ".png"), plot = violin_plot)
+
+
+# #Split samples inside loop for variables with many NAs
+# #Set splitting proportion for the calibration and validation data
+set.seed(123)
+pool=df.sel[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
+pool<-pool[order(pool$SSN),]
+poolid<-pool$SSN
+
+#Get calibration and validation datasets
+val_df<-pool
+cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+
+# threshold to exclude the extreme 5% values
+#KARARI UPDATE; 95% loses too many samples, changed to 99% 
+#FUSI UPDATE: this initially used to exclude the high high or low low values from the cal and the val set independently. I think this was leading to really small val datasets sometimes. So I did the exclusion before the split to retain the 70/30 split
+
+cal_df <-subset(cal_df1, cal_df1[,2]>quantile(cal_df1[,2], 0.10)&cal_df1[,2] <quantile(cal_df1[,2], 0.90))
+val_df1 <-subset(df.sel, (df.sel$SSN %in% val_df$SSN))
+val_df <-subset(val_df1, val_df1[,2]>quantile(val_df1[,2], 0.10)&val_df1[,2] <quantile(val_df1[,2], 0.90))
+
+val_df<-setorder(val_df)
+cal_df<-setorder(cal_df)
+
+ # Check if val_df is empty and there are more than 3
+  if (nrow(val_df) > 3) { 
+
+#Subset pre-treated spectra by available reference data
+val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
+cal_spec<-spec_trt[is.element(spec_trt$SSN, cal_df$SSN),]
+cal_spec<-cal_spec[order(cal_spec$SSN),]
+val_spec<-val_spec[order(val_spec$SSN),]
+
+
+#Get no of calibration and validation datasets
+N_cal<-nrow(cal_spec)
+N_val<-nrow(val_spec)
+
+#Model data
+Xcal.f=cal_spec[,-1]
+Xval.f=val_spec[,-1]
+dfcal.f=cal_df[,-1]
+dfval.f=val_df[,-1]
+
+        # Adjust the maxc to ensure it does not exceed the number of rows in Xcal.f or the selected number of components
+        maxc <- 25
+        maxc <- min(maxc, nrow(Xcal.f) - 1)
+
+        # Check if the number of components is valid based on the size of Xcal.f
+        if (maxc > 0) {
+            # FUSI EDIT: max was 25
+          
+          # Check if the number of segments exceeds the number of observations
+          num_segments <- min(10, N_cal)
+            
+          pls.prelim <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp = maxc, validation = "CV", segments = num_segments) # 10-fold CV
+
+            # Plot RMSEP vs. number of components
+            plot(pls.md, "val", main = slprptr[p])
+            dir.create("Components_plots_PLSR_MIR")
+            png(paste0(getwd(), "/Components_plots_PLSR_MIR/", slprptr[p], ".png"))
+            print(plot(pls.md, "val", main = slprptr[p]))
+            dev.off()
+        } else {
+            stop(paste("Invalid number of components for", slprptr[p], ": maxc is set to", maxc))
+        }
+
+# Calculate the variance explained by each component
+explained_variance <- explvar(pls.prelim) / 100  # Convert percentage to proportion
+
+# Calculate the cumulative variance
+cumulative_variance <- cumsum(explained_variance)
+
+# Find the minimum number of components that retain ≥90% of the variance
+n_components <- min(which(cumulative_variance >= 0.90))
+
+# Print the selected number of components
+cat("Selected number of components to retain ≥90% variance:", n_components, "\n")
+
+# Step 2: Train the final model using the selected number of components
+pls.md <- train(
+  x = Xcal.f,  # Predictor variables (spectral data)
+  y = dfcal.f, # Response variable (biochar properties)
+  na.action = na.omit,
+  trControl = trainControl(method = "cv", number = 10),  # 10-fold cross-validation
+  method = "pls",
+  tuneGrid = data.frame(ncomp = 1:n_components),  # Use a range of components from 1 to the selected number
+  metric = "RMSE"  # Select the best model by the smallest RMSE value
+)
+
+# Plotting RMSEP vs. number of components
+plot(pls.md)
+
+# Select the best number of components
+nc <- as.numeric(pls.md$bestTune$ncomp)  # Extract the best number of components
+
+# Extract RMSE and R^2 for the best number of components
+RMSE.c <- pls.md$results[pls.md$results$ncomp == nc, "RMSE"]
+R2.c <- pls.md$results[pls.md$results$ncomp == nc, "Rsquared"]
+
+# Generate relevant model name
+md.nm <- paste0("pls.md.", slprptr[p], ".nc", nc)
+
+# Rename the model with the looped Biochar property
+assign(x = md.nm, value = get("pls.md", pos = .GlobalEnv), pos = .GlobalEnv)
+
+# Predict to the validation dataset
+pls.prd <- predict(pls.md, newdata = Xval.f, ncomp = nc)
+
+
+
+## Return prediction statistics
+val.stats=round(goof(dfval.f, pls.prd, type = "spec"),3)
+val.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_val"), Comps="", N=N_val, val.stats)
+val.stats
+
+## calibration statistics
+pls.pc <- predict(pls.md, ncomp = nc, newdata = Xcal.f)
+
+pls.cal=round(goof(dfcal.f, pls.pc, type = "spec"),3)
+cal.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_cal"), Comps=as.character(nc), N=N_cal, pls.cal)
+cal.stats
+
+################### Get model statistics #########################
+mdstats<-bind_rows(cal.stats, val.stats)
+
+#Create model stats labels for the plot
+#FUSI EDIT: Removed comps from before N because plot was crowded should add back in and only remove in plot below 
+slct.stats<-as.data.frame(t(mdstats[,c("Property","N","R2","RMSE","bias","RPIQ" )])) 
+names(slct.stats)<-NULL
+slct.stats<-bind_cols(rownames(slct.stats),slct.stats[,2])
+
+#FUSI EDIT: added "comps" because it is in slct.stats 
+valbls<-paste0(c("N","R2","RMSE","bias","RPIQ"), "\n")
+valsts<-paste0(c(slct.stats[2,2],slct.stats[3,2],slct.stats[4,2],slct.stats[5,2],slct.stats[6,2]))
+valstats<-paste(valbls,valsts)
+
+#Bind all looped properties model stats
+mdl.stats<-bind_rows(mdl.stats,mdstats)
+
+
+lgth<-length(sort(dfval.f,decreasing=F))
+
+seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)
+
+#Plot validation plot
+plot(dfval.f,pls.prd,pch=10,
+     xlab=paste('Measured',names(val_df)[2],sep="_"),
+     ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+     xlim = range(c(dfval.f,pls.prd)),
+     ylim = range(c(dfval.f,pls.prd)),
+     mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+     )   ## plot the predicted vs. measured in the validation
+abline(a = 0, b = 1)
+
+
+dir.create("Plots_Validationplots_PLSR_MIR_Train")
+png(paste0(getwd(),"/Plots_Validationplots_PLSR_MIR_Train/",slprptr[p],".png"))
+print(plot(dfval.f,pls.prd,pch=10,
+           xlab=paste('Measured',names(val_df)[2],sep="_"),
+           ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+           xlim = range(c(dfval.f,pls.prd)),
+           ylim = range(c(dfval.f,pls.prd)),
+           mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+           ))
+abline(a = 0, b = 1)
+dev.off()
+
+
+################### Predict all samples #########################
+prd.smpls <- predict(pls.md, spec_trt[,-1])
+
+prd<-as.data.frame(prd.smpls)
+df.prd<-bind_cols(SSN=rownames(spec_trt),prd[,])#[,nc]) #FUSI EDIT previously was refering to an nc colum which doesn't exist for the trained model & changed the rownames to reference spec_trt because it used to reference prd, but prd just had numbers
+colnames(df.prd)<-c("SSN",slprptr[p])
+
+pred<-merge(pred, df.prd, by="SSN", all.x = T)
+
+
+  } else {
+    print(paste("Skipping testing parameter:", slprptr[p], "because val_df is empty."))
+  }
+}
+#FUSI EDIT: End of for loop
+
+
+```
+
+```{r}
+
+mdl.stats <- NULL # Model stats container
+top_loadings_df_pc1 <- NULL
+top_loadings_df_pc2 <- NULL
+
+# Create directory for saving wavenumbers vs. loadings plots
+dir.create("Wavenumbers_vs_Loadings_PLSR_MIR_Train", showWarnings = FALSE)
+
+for(p in 10:length(slprptr)) {
+    # Select properties to predict one at a time and remove NAs  
+    df.sel <- df.f %>% select(SSN, slprptr[p]) %>% na.omit
+
+    # Apply outlier filtering
+    df.sel <- filter_outliers(df.sel, colnames(df.sel)[2])
+
+    if (nrow(df.sel) > 3) {
+        # Plot and save Biochar properties boxplots
+        dir.create("Plots_Boxplots_PLSR_MIR_Train", showWarnings = FALSE)
+        png(paste0(getwd(), "/Plots_Boxplots_PLSR_MIR_Train/", slprptr[p], ".png"))
+        boxplot(df.sel[, slprptr[p]], las = 2, xlab = slprptr[p], ylab = "")
+        dev.off()
+
+        # Plot and save Biochar properties violin plots
+        violin_plot <- ggplot(data = df.sel, aes(x = "", y = !!sym(slprptr[p]))) +
+            geom_violin(fill = "skyblue", color = "blue") + 
+            geom_boxplot(width = 0.1, fill = "white", color = "black") +  
+            labs(x = "", y = slprptr[p]) +  
+            coord_flip() +  
+            theme_minimal() +  
+            theme(axis.text.x = element_blank()) +  
+            ggtitle(paste("Violin Plot of", slprptr[p]))  
+        ggsave(paste0("Plots_Violinplots_PLSR_MIR_Train/", slprptr[p], ".png"), plot = violin_plot)
+
+        # Split samples for calibration and validation
+        set.seed(123)
+        pool <- df.sel[sample(nrow(df.sel), round(0.3 * nrow(df.sel), 0)), ]
+        pool <- pool[order(pool$SSN), ]
+        poolid <- pool$SSN
+
+        # Get calibration and validation datasets
+        val_df <- pool
+        cal_df1 <- subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+
+        # Exclude extreme values
+        cal_df <- subset(cal_df1, cal_df1[, 2] > quantile(cal_df1[, 2], 0.10) & cal_df1[, 2] < quantile(cal_df1[, 2], 0.90))
+        val_df1 <- subset(df.sel, (df.sel$SSN %in% val_df$SSN))
+        val_df <- subset(val_df1, val_df1[, 2] > quantile(val_df1[, 2], 0.10) & val_df1[, 2] < quantile(val_df1[, 2], 0.90))
+
+        val_df <- setorder(val_df)
+        cal_df <- setorder(cal_df)
+
+        if (nrow(val_df) > 3) {
+            # Subset spectra by available reference data
+            val_spec <- spec_trt[is.element(spec_trt$SSN, val_df$SSN), ]
+            cal_spec <- spec_trt[is.element(spec_trt$SSN, cal_df$SSN), ]
+            cal_spec <- cal_spec[order(cal_spec$SSN), ]
+            val_spec <- val_spec[order(val_spec$SSN), ]
+
+            N_cal <- nrow(cal_spec)
+            N_val <- nrow(val_spec)
+
+            # Model data
+            Xcal.f <- cal_spec[, -1]
+            Xval.f <- val_spec[, -1]
+            dfcal.f <- cal_df[, -1]
+            dfval.f <- val_df[, -1]
+
+            maxc <- 25
+            maxc <- min(maxc, nrow(Xcal.f) - 1)
+
+            if (maxc > 0) {
+                # Preliminary model for variance explained
+                pls.prelim <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp = maxc, validation = "CV", segments = min(10, N_cal))
+
+                explained_variance <- explvar(pls.prelim) / 100
+                cumulative_variance <- cumsum(explained_variance)
+                n_components <- min(which(cumulative_variance >= 0.90))
+
+                cat("Selected number of components to retain ≥90% variance:", n_components, "\n")
+
+                # Train final model using selected components
+                pls.md <- train(
+                    x = Xcal.f, 
+                    y = dfcal.f, 
+                    na.action = na.omit,
+                    trControl = trainControl(method = "cv", number = 10),  
+                    method = "pls",
+                    tuneGrid = data.frame(ncomp = 1:n_components),
+                    metric = "RMSE"
+                )
+
+                # Plot RMSEP vs. number of components
+                plot(pls.md)  
+                dir.create("Components_plots_PLSR_MIR", showWarnings = FALSE)
+                png(paste0(getwd(), "/Components_plots_PLSR_MIR/", slprptr[p], ".png"))
+                print(plot(pls.md))  
+                dev.off()
+
+                # Select best number of components
+                nc <- as.numeric(pls.md$bestTune$ncomp)
+
+                pls.prd <- predict(pls.md, newdata = Xval.f, ncomp = nc)
+
+                val.stats <- round(goof(dfval.f, pls.prd, type = "spec"), 3)
+                val.stats <- bind_cols(Property = paste0(slprptr[p], "_val"), Comps = "", N = N_val, val.stats)
+
+                pls.pc <- predict(pls.md, ncomp = nc, newdata = Xcal.f)
+                pls.cal <- round(goof(dfcal.f, pls.pc, type = "spec"), 3)
+                cal.stats <- bind_cols(Property = paste0(slprptr[p], "_cal"), Comps = as.character(nc), N = N_cal, pls.cal)
+
+                # Combine model statistics
+                mdstats <- bind_rows(cal.stats, val.stats)
+
+                # Create model stats labels for the plot
+                slct.stats <- as.data.frame(t(mdstats[, c("Property", "N", "R2", "RMSE", "bias", "RPIQ")]))
+                names(slct.stats) <- NULL
+                slct.stats <- bind_cols(rownames(slct.stats), slct.stats[, 2])
+
+                valbls <- paste0(c("N", "R2", "RMSE", "bias", "RPIQ"), "\n")
+                valsts <- paste0(c(slct.stats[2, 2], slct.stats[3, 2], slct.stats[4, 2], slct.stats[5, 2], slct.stats[6, 2]))
+                valstats <- paste(valbls, valsts)
+
+                # Bind all looped properties model stats
+                mdl.stats <- bind_rows(mdl.stats, mdstats)
+
+                lgth <- length(sort(dfval.f, decreasing = FALSE))
+
+                seq.int(sort(dfval.f, decreasing = FALSE)[1], sort(dfval.f, decreasing = FALSE)[lgth], length.out = 4)
+
+                # Plot validation plot
+                plot(dfval.f, pls.prd, pch = 10,
+                     xlab = paste('Measured', names(val_df)[2], sep = "_"),
+                     ylab = paste('Predicted', names(val_df)[2], sep = "_"), 
+                     xlim = range(c(dfval.f, pls.prd)),
+                     ylim = range(c(dfval.f, pls.prd)),
+                     mtext(valstats[-1], side = 3, at = c(seq.int(sort(dfval.f, decreasing = FALSE)[1], sort(dfval.f, decreasing = FALSE)[lgth], length.out = 4)))
+                )   ## plot the predicted vs. measured in the validation
+                abline(a = 0, b = 1)
+
+                dir.create("Plots_Validationplots_PLSR_MIR_Train", showWarnings = FALSE)
+                png(paste0(getwd(), "/Plots_Validationplots_PLSR_MIR_Train/", slprptr[p], ".png"))
+                print(plot(dfval.f, pls.prd, pch = 10,
+                           xlab = paste('Measured', names(val_df)[2], sep = "_"),
+                           ylab = paste('Predicted', names(val_df)[2], sep = "_"), 
+                           xlim = range(c(dfval.f, pls.prd)),
+                           ylim = range(c(dfval.f, pls.prd)),
+                           mtext(valstats[-1], side = 3, at = c(seq.int(sort(dfval.f, decreasing = FALSE)[1], sort(dfval.f, decreasing = FALSE)[lgth], length.out = 4)))
+                ))
+                abline(a = 0, b = 1)
+                dev.off()
+
+                # Predict all samples
+                prd.smpls <- predict(pls.md, spec_trt[,-1])
+
+                prd <- as.data.frame(prd.smpls)
+                df.prd <- bind_cols(SSN = rownames(spec_trt), prd)  # FUSI EDIT: reference to spec_trt for rownames
+                colnames(df.prd) <- c("SSN", slprptr[p])
+
+                pred <- merge(pred, df.prd, by = "SSN", all.x = TRUE)
+
+                # # Extract loadings
+                # loadings <- pls.md$finalModel$loadings  # Access the final model loadings
+                # 
+                # # Identify the top loaded variables for each component
+                # top_loaded_variables_pc1 <- head(names(sort(abs(loadings[, 1]), decreasing = TRUE)), 30)
+                # top_loaded_variables_pc2 <- head(names(sort(abs(loadings[, 2]), decreasing = TRUE)), 30)
+                # 
+                # # Remove single quotes from variable names
+                # top_loaded_variables_pc1 <- gsub("`|'", "", top_loaded_variables_pc1)
+                # top_loaded_variables_pc2 <- gsub("`|'", "", top_loaded_variables_pc2)
+                # 
+                # # Place them in a dataframe 
+                # df_pc1 <- t(data.frame(as.numeric(top_loaded_variables_pc1), stringsAsFactors = FALSE))
+                # df_pc2 <- t(data.frame(as.numeric(top_loaded_variables_pc2), stringsAsFactors = FALSE))
+                # 
+                # # Optionally, set the column names
+                # colnames(df_pc1) <- paste0("Loading_", 1:ncol(df_pc1))
+                # colnames(df_pc2) <- paste0("Loading_", 1:ncol(df_pc2))
+                # 
+                # # Create data frame for PC1 loadings
+                # df_pc1_var <- data.frame(Response_Variable = slprptr[p])
+                # 
+                # # Create data frame for PC2 loadings
+                # df_pc2_var <- data.frame(Response_Variable = slprptr[p])
+                # 
+                # # Append data frames to the main data frames
+                # top_loadings_df_pc1 <- bind_rows(top_loadings_df_pc1, bind_cols(df_pc1_var, df_pc1))
+                # top_loadings_df_pc2 <- bind_rows(top_loadings_df_pc2, bind_cols(df_pc2_var, df_pc2))
+
+            } else {
+                stop(paste("Invalid number of components for", slprptr[p], ": maxc is set to", maxc))
+            }
+        } else {
+            print(paste("Skipping testing parameter:", slprptr[p], "because val_df is empty or insufficient samples."))
+        }
+    } else {
+        print(paste("Skipping testing parameter:", slprptr[p], "due to insufficient data after outlier filtering."))
+    }
+}
+# FUSI EDIT: End of for loop
+                                       
+```
+
+Creating Model Stats
+
+```{r}
+
+# Add two new columns based on whether the Property contains "_val" or "_cal"
+mdl.stats_PLSR_MIR <- mdl.stats %>%
+  mutate(Property_Name = gsub("(_cal|_val).*", "", Property),
+         Data_Type = ifelse(grepl("_val", Property), "_val", "_cal"))
+
+#Write model statistics and predicted values to the local drive
+write.csv(mdl.stats_PLSR_MIR, paste0(getwd(),"/Model_Statistics_PLSR_MIR_Train.csv"),row.names = F)
+write.csv(pred, paste0(getwd(),"/Predicted_Biochar_Properties_PLSR_MIR_Train.csv"),row.names = F)
+getwd()
+
+saveRDS(mdl.stats_PLSR_MIR,"mdl.stats_PLSR_MIR_Train.RDS")
+```
+
+Plotting High Performing Samples
+
+```{r}
+ 
+#Select only properties with R2 without NA's
+
+mdl.stats_PLSR_MIR <- readRDS("mdl.stats_PLSR_MIR_Train.RDS")
+mdl.stats_filtered <- mdl.stats_PLSR_MIR[complete.cases(mdl.stats_PLSR_MIR$R2), ]
+
+# Filter the dataframe based on the conditions
+
+# Group by Property_Name and filter for those with R2 > 0.6 for both _cal and _val
+mdl.stats_filtered_0_6 <- mdl.stats_filtered %>%
+  group_by(Property_Name) %>%
+  filter(!any(is.na(R2) & Data_Type %in% c("_cal", "_val"))) %>%
+  filter(all(R2 > 0.6 & Data_Type %in% c("_cal", "_val")))
+
+
+# Define a custom color palette
+my_palette <- c("#FF5733", "#FFC300")
+
+# Plotting
+cal_val_top_plot <-ggplot(mdl.stats_filtered_0_6 , aes(x = Property_Name, y = R2, fill = Data_Type, group = Data_Type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = N), position = position_dodge(width = 0.8), vjust = -0.5, size = 2, color = "black") +  # Add text labels for N
+  labs(title = "Properties with R2 of cal & val > 0.6 PLSR MIR",
+       x = "Property",
+       y = "R2") +
+  scale_fill_manual(values = my_palette, name = "Data Type", labels = c("Cal", "Val")) +  # Manual fill scale
+  guides(fill = guide_legend(override.aes = list(size = 5, color = "black", label = c("Cal (N)", "Val (N)")))) +  # Customize legend
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.background = element_rect(fill = "white"),  # Change plot background color
+        legend.position = "right",  # Move legend to the right
+        legend.text = element_text(size = 12),  # Adjust legend text size
+        legend.key = element_rect(fill = my_palette, color = "black"),  # Customize legend key colors
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Center the title
+        panel.border = element_rect(color = "black", fill = NA, size = 1),  # Add a border around the plot area
+        panel.grid.major = element_blank(),  # Remove major gridlines
+        panel.grid.minor = element_blank(),  # Remove minor gridlines
+        axis.line = element_line(color = "black"),  # Add axis lines
+        axis.title = element_text(size = 14),  # Adjust axis title font size
+        axis.text = element_text(size = 12))  # Adjust axis text siz
+# Save the plot
+ggsave(paste0(getwd(), "/cal_val_PLSR_MIR_Train", ".png"),
+       plot = cal_val_top_plot,
+       width = 8,
+       height = 6, 
+       units = "in",
+       dpi = 300)
+cal_val_top_plot
+
+# Extract relevant columns for the top properties and both _cal and _val data
+mdl.stats_table <- mdl.stats_filtered_0_6[, c("Property_Name", "Data_Type","R2", "RPIQ", "RMSE", "bias", "N")]
+
+# Create a new factor variable to control the order of rows in the table
+#mdl.stats_table$Property_Name <- factor(mdl.stats_table$Property_Name, levels = top_properties_cal)  
+
+# Order the rows based on Property_Name and Data_Type
+mdl.stats_table <- mdl.stats_table[order(mdl.stats_table$Property_Name, mdl.stats_table$Data_Type), ] %>%
+  arrange(desc(R2))
+
+
+# Create a table with the top properties, both _cal and _val data
+mdl.stats_table_wide <- mdl.stats_table %>%
+  pivot_wider(
+    id_cols = c("Property_Name"),
+    names_from = "Data_Type",
+    values_from = c("R2","RPIQ", "RMSE", "bias", "N"),
+    names_sep = "_"
+  )
+# Save the table to a CSV file
+write.csv(mdl.stats_table, paste0(getwd(), "/Top_Properties_Stats_PLSR_MIR_Train.csv"), row.names = FALSE)
+
+```
+
+\
+\
+\
+\
+\
+\
+\

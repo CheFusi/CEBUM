@@ -36,7 +36,7 @@ QUESTION:
 
 Loading libraries
 
-```{r, warning=FALSE}
+```{r, warning=FALSE, message=FALSE}
 
 #If package ithir is not available for your version of R
 #Use the 3 below lines to install package ithir
@@ -104,13 +104,272 @@ slprptr<-names(df.f[-c(2:9)]) #FUSI EDIT: removing metadata columns
 #creating a df with the number of components so I can manually define the
 # nc_df <- data.frame (SSN=slprptr[-1],
 #                        nc=NA)
-# 
+# nc_df <- nc_df[order(nc_df$SSN), ]
 # write.csv(nc_df, paste0(getwd(),"/nc_df.csv"),row.names = F)
 
 nc_df <-read.csv("nc_df.csv")
 
 pred<-as.data.frame(spec_trt[,1])
 colnames(pred)<-"SSN"
+
+```
+
+```{r}
+# 
+# #FUSI EDIT
+# 
+# mdl.stats<-NULL#Model stats container
+# top_loadings_df_pc1 <- NULL
+# top_loadings_df_pc2  <- NULL
+# 
+# # Create directory for saving wavenumbers vs. loadings plots
+# dir.create("Wavenumbers_vs_Loadings_PLSR_MIR")
+# 
+# 
+# #FUSI EDIT: started at 10 because of metadata
+# for(p in 3:length(slprptr)){
+# #for(p in c(107)){
+# #Select properties to predict one at a time and remove NAs  
+# df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
+# 
+# df.sel_ <-subset(df.sel, df.sel[,2]>quantile(df.sel[,2], 0.01)&df.sel[,2] <quantile(df.sel[,2], 0.99))
+# 
+# #Plot and print Biochar properties boxplots
+# boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
+# dir.create("Plots_Boxplots_PLSR_MIR")
+# png(paste0(getwd(),"/Plots_Boxplots_PLSR_MIR/",slprptr[p],".png"))
+# print(boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = ""))
+# dev.off()
+# 
+# # Plot and print Biochar properties violin plots
+# violin_plot <- ggplot(data = df.sel, aes(x = "", y = !!sym(slprptr[p]))) +
+#   geom_violin(fill = "skyblue", color = "blue") +  # Customize fill and border color
+#   geom_boxplot(width = 0.1, fill = "white", color = "black") +  # Add box plot for reference
+#   labs(x = "", y = slprptr[p]) +  # Customize axis labels
+#   coord_flip() +  # Rotate plot by 90 degrees for horizontal orientation
+#   theme_minimal() +  # Use a minimal theme
+#   theme(axis.text.x = element_blank()) +  # Hide x-axis labels
+#   ggtitle(paste("Violin Plot of", slprptr[p]))  # Add plot title
+# 
+# # Save plot as PNG
+# ggsave(paste0("Plots_Violinplots_PLSR_MIR/", slprptr[p], ".png"), plot = violin_plot)
+# 
+# 
+# # #Split samples inside loop for variables with many NAs
+# # #Set splitting proportion for the calibration and validation data
+# set.seed(123)
+# pool=df.sel[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
+# pool<-pool[order(pool$SSN),]
+# poolid<-pool$SSN
+# 
+# #Get calibration and validation datasets
+# val_df<-pool
+# cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+# 
+# # threshold to exclude the extreme 5% values
+# #KARARI UPDATE; 95% loses too many samples, changed to 99% 
+# #FUSI UPDATE: this initially used to exclude the high high or low low values from the cal and the val set independently. I think this was leading to really small val datasets sometimes. So I did the exclusion before the split to retain the 70/30 split
+# 
+# cal_df <-subset(cal_df1, cal_df1[,2]>quantile(cal_df1[,2], 0.10)&cal_df1[,2] <quantile(cal_df1[,2], 0.90))
+# val_df1 <-subset(df.sel, (df.sel$SSN %in% val_df$SSN))
+# val_df <-subset(val_df1, val_df1[,2]>quantile(val_df1[,2], 0.10)&val_df1[,2] <quantile(val_df1[,2], 0.90))
+# 
+# val_df<-setorder(val_df)
+# cal_df<-setorder(cal_df)
+# 
+#  # Check if val_df is empty and there are more than 3
+#   if (nrow(val_df) > 3) { 
+# 
+# #Subset pre-treated spectra by available reference data
+# val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
+# cal_spec<-spec_trt[is.element(spec_trt$SSN, cal_df$SSN),]
+# cal_spec<-cal_spec[order(cal_spec$SSN),]
+# val_spec<-val_spec[order(val_spec$SSN),]
+# 
+# 
+# #Get no of calibration and validation datasets
+# N_cal<-nrow(cal_spec)
+# N_val<-nrow(val_spec)
+# 
+# #Model data
+# Xcal.f=cal_spec[,-1]
+# Xval.f=val_spec[,-1]
+# dfcal.f=cal_df[,-1]
+# dfval.f=val_df[,-1]
+# 
+# ####
+# if (nrow(cal_df) < 25) {
+#   maxc <- nrow(cal_df) - 1
+# } else {
+#   maxc <- 25
+# }## number of max components
+# 
+# #Fusi edit
+# 
+# # Check if the number of observations is less than the desired number of components
+# if (nrow(Xcal.f) < nc) {
+#   nc <- nrow(Xcal.f) - 1
+#   warning(paste("Reduced number of components to", nc, "for", slprptr[p], "due to insufficient observations."))
+# }
+# 
+# #FUSI EDIT: max was 25
+# pls.md <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp=maxc, validation = "CV", segments = 10)#10-fold CV
+# #Each iteration of the cross-validation process involves training the model on 9 of the 10 segments and testing it on the remaining segment, repeating this process 10 times to ensure each segment is used as a test set once.
+# 
+# ## plot RMSEP vs. number of components
+# plot(pls.md, "val", main=slprptr[p]) 
+# 
+# dir.create("Components_plots_PLSR_MIR")
+# png(paste0(getwd(),"/Components_plots_PLSR_MIR/",slprptr[p],".png"))
+# print(plot(pls.md, "val", main=slprptr[p]))
+# dev.off()
+# 
+# # ## no. components to use, the one with the smallest adj RMSEP value
+# # RMSEP.obj<-RMSEP(pls.md)
+# # str(RMSEP.obj)
+# # 
+# # RMSEP.obj$val[1:2,1,]
+# # nc <- as.numeric(sub("comps", "", names(which.min(RMSEP.obj$val[1,1,2:dim(RMSEP.obj$val[1:2,1,])[2]]))))
+# 
+# #FUSI EDIT
+# #Mnually selecting the number of components
+# 
+# nc <- nc_df$nc[which(nc_df$SSN == slprptr[p])]
+# 
+# #Generate relevant model name
+# md.nm<-paste0("pls.md.", slprptr[p], ".nc", nc)
+# 
+# #Rename model with the looped Biochar property
+# assign(x = md.nm, value = get("pls.md", pos = .GlobalEnv), pos = .GlobalEnv)
+# 
+# ## predict to validation dataset
+# pls.prd <- predict(pls.md, ncomp = nc, newdata = Xval.f)
+# 
+# ## Return prediction statistics
+# val.stats=round(goof(dfval.f, pls.prd, type = "spec"),3)
+# val.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_val"), Comps="", N=N_val, val.stats)
+# val.stats
+# 
+# ## calibration statistics
+# pls.pc <- predict(pls.md, ncomp = nc, newdata = Xcal.f)
+# 
+# pls.cal=round(goof(dfcal.f, pls.pc, type = "spec"),3)
+# cal.stats<-bind_cols(Property=paste0(Property=slprptr[p],"_cal"), Comps=as.character(nc), N=N_cal, pls.cal)
+# cal.stats
+# 
+# ################### Get model statistics #########################
+# mdstats<-bind_rows(cal.stats, val.stats)
+# 
+# #Create model stats labels for the plot
+# #FUSI EDIT: Removed comps from before N because plot was crowded should add back in and only remove in plot below 
+# slct.stats<-as.data.frame(t(mdstats[,c("Property","N","R2","RMSE","bias","RPIQ" )])) 
+# names(slct.stats)<-NULL
+# slct.stats<-bind_cols(rownames(slct.stats),slct.stats[,2])
+# 
+# #FUSI EDIT: added "comps" because it is in slct.stats 
+# valbls<-paste0(c("N","R2","RMSE","bias","RPIQ"), "\n")
+# valsts<-paste0(c(slct.stats[2,2],slct.stats[3,2],slct.stats[4,2],slct.stats[5,2],slct.stats[6,2]))
+# valstats<-paste(valbls,valsts)
+# 
+# #Bind all looped properties model stats
+# mdl.stats<-bind_rows(mdl.stats,mdstats)
+# 
+# 
+# lgth<-length(sort(dfval.f,decreasing=F))
+# 
+# seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)
+# 
+# #Plot validation plot
+# plot(dfval.f,pls.prd,pch=10,
+#      xlab=paste('Measured',names(val_df)[2],sep="_"),
+#      ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+#      xlim = range(c(dfval.f,pls.prd)),
+#      ylim = range(c(dfval.f,pls.prd)),
+#      mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+#      )   ## plot the predicted vs. measured in the validation
+# abline(a = 0, b = 1)
+# 
+# 
+# dir.create("Plots_Validationplots_PLSR_MIR")
+# png(paste0(getwd(),"/Plots_Validationplots_PLSR_MIR/",slprptr[p],".png"))
+# print(plot(dfval.f,pls.prd,pch=10,
+#            xlab=paste('Measured',names(val_df)[2],sep="_"),
+#            ylab=paste('Predicted',names(val_df)[2],sep="_"), 
+#            xlim = range(c(dfval.f,pls.prd)),
+#            ylim = range(c(dfval.f,pls.prd)),
+#            mtext(valstats[-1],side=3, at=c(seq.int(sort(dfval.f,decreasing=F)[1], sort(dfval.f,decreasing=F)[lgth],length.out=4)))
+#            ))
+# abline(a = 0, b = 1)
+# dev.off()
+# 
+# 
+# ################### Predict all samples #########################
+# prd.smpls <- predict(pls.md, spec_trt[,-1])
+# 
+# prd<-as.data.frame(prd.smpls)
+# df.prd<-bind_cols(SSN=rownames(prd),prd[,nc])
+# colnames(df.prd)<-c("SSN",slprptr[p])
+# 
+# pred<-merge(pred, df.prd, by="SSN", all.x = T)
+# 
+# 
+# 
+# #FUSI EDIT: extracting top loadings
+# 
+#   # Extract loadings
+#   loadings <- pls.md$loadings
+#   
+#   # Get wavenumbers
+#   wavenumbers <- rownames(loadings)
+# 
+# # Plot wavenumbers vs. loadings
+# wavenumbers_numeric <- as.numeric(gsub("`", "", wavenumbers))  # Remove backticks and convert to numeric
+# plot(wavenumbers_numeric, loadings[, nc], type = "l", xlab = "Wavenumbers", ylab = "Loadings", main = paste("Wavenumbers vs. Loadings for", slprptr[p]), xlim = rev(range(wavenumbers_numeric)))
+# png(paste0(getwd(), "/Wavenumbers_vs_Loadings_PLSR_MIR/", slprptr[p], "_loadings.png"))
+# print(plot(wavenumbers_numeric, loadings[, nc], type = "l", xlab = "Wavenumbers", ylab = "Loadings", main = paste("Wavenumbers vs. Loadings for", slprptr[p]), xlim = rev(range(wavenumbers_numeric))))
+# dev.off()
+#   
+#   
+#   
+#   # Identify the top loaded variables for each component
+#   top_loaded_variables_pc1 <- head(names(sort(abs(loadings[, 1]), decreasing = TRUE)), 30)
+#   top_loaded_variables_pc2 <- head(names(sort(abs(loadings[, 2]), decreasing = TRUE)), 30)
+#   
+#   #remove single quotes
+#   top_loaded_variables_pc1<- gsub("`|'", "", top_loaded_variables_pc1)
+#   top_loaded_variables_pc2<- gsub("`|'", "", top_loaded_variables_pc2)
+#   
+#   # plsce them in a dataframe 
+#   df_pc1 <- t(data.frame(as.numeric(top_loaded_variables_pc1), stringsAsFactors = FALSE))
+#   df_pc2 <- t(data.frame(as.numeric(top_loaded_variables_pc2), stringsAsFactors = FALSE))
+#   
+#   # Optionally, set the column names
+# colnames(df_pc1) <- paste0("Loading_", 1:ncol(df_pc1))
+# colnames(df_pc2) <- paste0("Loading_", 1:ncol(df_pc2))
+#   
+#   # Create data frame for PC1 loadings
+#   df_pc1_var <- data.frame(Response_Variable = slprptr[p])
+#   
+#   # Create data frame for PC2 loadings
+#   df_pc2_var <- data.frame(Response_Variable = slprptr[p])
+#   
+#   # Append data frames to the main data frames
+#   top_loadings_df_pc1 <- bind_rows(top_loadings_df_pc1, bind_cols(df_pc1_var, df_pc1))
+#   top_loadings_df_pc2 <- bind_rows(top_loadings_df_pc2, bind_cols(df_pc2_var, df_pc2))
+# 
+# 
+#   
+#   } else {
+#     print(paste("Skipping testing parameter:", slprptr[p], "because val_df is empty."))
+#   }
+# }
+# #FUSI EDIT: End of for loop
+
+
+
+```
+
+```{r}
 
 
 #FUSI EDIT
@@ -124,12 +383,12 @@ dir.create("Wavenumbers_vs_Loadings_PLSR_MIR")
 
 
 #FUSI EDIT: started at 10 because of metadata
-for(p in 105:length(slprptr)){
+for(p in 3:length(slprptr)){
 #for(p in c(107)){
 #Select properties to predict one at a time and remove NAs  
 df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
 
-df.sel_ <-subset(df.sel, df.sel[,2]>quantile(df.sel[,2], 0.01)&df.sel[,2] <quantile(df.sel[,2], 0.99))
+df.sel_ <-subset(df.sel, df.sel[,2]>quantile(df.sel[,2], 0.05)&df.sel[,2] <quantile(df.sel[,2], 0.95))
 
 #Plot and print Biochar properties boxplots
 boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
@@ -194,24 +453,27 @@ Xval.f=val_spec[,-1]
 dfcal.f=cal_df[,-1]
 dfval.f=val_df[,-1]
 
-####
-if (nrow(cal_df) < 25) {
-  maxc <- nrow(cal_df) - 1
+# Adjust the maxc to ensure it does not exceed the number of rows in Xcal.f or the selected number of components
+
+maxc <- 25
+maxc <- min(maxc, nrow(Xcal.f) - 1)
+
+# Check if the number of components is valid based on the size of Xcal.f
+if (maxc > 0) {
+    #FUSI EDIT: max was 25
+    pls.md <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp=maxc, validation = "CV", segments = 10) # 10-fold CV
+    # Each iteration of the cross-validation process involves training the model on 9 of the 10 segments and testing it on the remaining segment, repeating this process 10 times to ensure each segment is used as a test set once.
+
+    ## plot RMSEP vs. number of components
+    plot(pls.md, "val", main=slprptr[p]) 
+
+    dir.create("Components_plots_PLSR_MIR")
+    png(paste0(getwd(),"/Components_plots_PLSR_MIR/",slprptr[p],".png"))
+    print(plot(pls.md, "val", main=slprptr[p]))
+    dev.off()
 } else {
-  maxc <- 25
-}## number of max components
-
-#FUSI EDIT: max was 25
-pls.md <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp=maxc, validation = "CV", segments = 10)#10-fold CV
-#Each iteration of the cross-validation process involves training the model on 9 of the 10 segments and testing it on the remaining segment, repeating this process 10 times to ensure each segment is used as a test set once.
-
-## plot RMSEP vs. number of components
-plot(pls.md, "val", main=slprptr[p]) 
-
-dir.create("Components_plots_PLSR_MIR")
-png(paste0(getwd(),"/Components_plots_PLSR_MIR/",slprptr[p],".png"))
-print(plot(pls.md, "val", main=slprptr[p]))
-dev.off()
+    stop(paste("Invalid number of components for", slprptr[p], ": maxc is set to", maxc))
+}
 
 # ## no. components to use, the one with the smallest adj RMSEP value
 # RMSEP.obj<-RMSEP(pls.md)
@@ -224,6 +486,12 @@ dev.off()
 #Mnually selecting the number of components
 
 nc <- nc_df$nc[which(nc_df$SSN == slprptr[p])]
+
+# Ensure that the selected nc does not exceed the number of samples in the validation dataset
+if (nc >= N_val) {
+    warning(paste("Selected number of components (nc =", nc, ") exceeds or equals the number of validation samples (N_val =", N_val, "). Reducing nc to ", N_val - 1, sep=""))
+    nc <- N_val - 1  # Reducing nc to be one less than the number of validation samples
+}
 
 #Generate relevant model name
 md.nm<-paste0("pls.md.", slprptr[p], ".nc", nc)
@@ -312,11 +580,12 @@ pred<-merge(pred, df.prd, by="SSN", all.x = T)
   wavenumbers <- rownames(loadings)
 
 # Plot wavenumbers vs. loadings
-wavenumbers_numeric <- as.numeric(gsub("`", "", wavenumbers))  # Remove backticks and convert to numeric
-plot(wavenumbers_numeric, loadings[, nc], type = "l", xlab = "Wavenumbers", ylab = "Loadings", main = paste("Wavenumbers vs. Loadings for", slprptr[p]), xlim = rev(range(wavenumbers_numeric)))
-png(paste0(getwd(), "/Wavenumbers_vs_Loadings_PLSR_MIR/", slprptr[p], "_loadings.png"))
-print(plot(wavenumbers_numeric, loadings[, nc], type = "l", xlab = "Wavenumbers", ylab = "Loadings", main = paste("Wavenumbers vs. Loadings for", slprptr[p]), xlim = rev(range(wavenumbers_numeric))))
-dev.off()
+  
+# wavenumbers_numeric <- as.numeric(gsub("`", "", wavenumbers))  # Remove backticks and convert to numeric
+# plot(wavenumbers_numeric, loadings[, nc], type = "l", xlab = "Wavenumbers", ylab = "Loadings", main = paste("Wavenumbers vs. Loadings for", slprptr[p]), xlim = rev(range(wavenumbers_numeric)))
+# png(paste0(getwd(), "/Wavenumbers_vs_Loadings_PLSR_MIR/", slprptr[p], "_loadings.png"))
+# print(plot(wavenumbers_numeric, loadings[, nc], type = "l", xlab = "Wavenumbers", ylab = "Loadings", main = paste("Wavenumbers vs. Loadings for", slprptr[p]), xlim = rev(range(wavenumbers_numeric))))
+# dev.off()
   
   
   
@@ -358,6 +627,306 @@ colnames(df_pc2) <- paste0("Loading_", 1:ncol(df_pc2))
 
 ```
 
+### Removing outliers \> 1.5\* IQR
+
+```{r}
+
+# Function to apply IQR, MAD, and Z-score filtering in sequence
+filter_outliers <- function(data, variable) {
+  # Step 1: IQR Filtering
+  Q1 <- quantile(data[[variable]], 0.25)
+  Q3 <- quantile(data[[variable]], 0.75)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  filtered_data <- subset(data, data[[variable]] >= lower_bound & data[[variable]] <= upper_bound)
+  
+  print(paste("After IQR filtering, remaining data points:", nrow(filtered_data)))
+  
+  # # Assess if further filtering is needed
+  # if (nrow(filtered_data) < nrow(data)) {
+  #   # Step 2: MAD Filtering if significant outliers remain
+  #   median_value <- median(filtered_data[[variable]])
+  #   MAD <- mad(filtered_data[[variable]])
+  #   threshold <- 5 * MAD
+  #   mad_filtered_data <- subset(filtered_data, abs(filtered_data[[variable]] - median_value) <= threshold)
+  #   
+  #   print(paste("After MAD filtering, remaining data points:", nrow(mad_filtered_data)))
+  #   
+  #   # Reassess if further filtering is needed
+  #   if (nrow(mad_filtered_data) < nrow(filtered_data)) {
+  #     # Step 3: Z-Score Filtering if significant outliers still remain
+  #     z_scores <- scale(mad_filtered_data[[variable]])
+  #     z_filtered_data <- subset(mad_filtered_data, abs(z_scores) <= 3)
+  # 
+  #     print(paste("After Z-score filtering, remaining data points:", nrow(z_filtered_data)))
+  # 
+  #     # Final dataset after all filters
+  #     return(z_filtered_data)
+  #   } else {
+  #     # Return data after MAD filtering
+  #     print("No significant outliers detected after MAD filtering. No Z-score filtering applied.")
+  #     return(mad_filtered_data)
+  #   }
+  # } else {
+  #   # Return data after IQR filtering
+  #   print("No significant outliers detected after IQR filtering. No further filtering applied.")
+  #   return(filtered_data)
+  # }
+    # When doing just IQR filtering
+    # Return data after IQR filtering
+  return(filtered_data)
+}
+```
+
+### modeling with \>1.5\*IQR Removed
+
+```{r}
+
+#FUSI EDIT
+
+mdl.stats <- NULL # Model stats container
+top_loadings_df_pc1 <- NULL
+top_loadings_df_pc2 <- NULL
+
+# Create directory for saving wavenumbers vs. loadings plots
+dir.create("Wavenumbers_vs_Loadings_PLSR_MIR")
+
+# FUSI EDIT: started at 10 because of metadata
+for (p in 3:length(slprptr)) {
+    # Select properties to predict one at a time and remove NAs  
+    df.sel <- df.f %>% select(SSN, slprptr[p]) %>% na.omit
+
+    # Original line using quantile-based filtering
+    #df.sel_ <-subset(df.sel, df.sel[,2]>quantile(df.sel[,2], 0.05)&df.sel[,2] <quantile(df.sel[,2], 0.95))
+
+    # FUSI edit
+    # Replace it with:
+    df.sel <- filter_outliers(df.sel, colnames(df.sel)[2])
+
+    # Check if df.sel is empty before proceeding with plots
+    if (nrow(df.sel) > 0) {
+        # Plot and print Biochar properties boxplots
+        boxplot(df.sel[,slprptr[p]], las = 2, xlab = slprptr[p], ylab = "")
+        dir.create("Plots_Boxplots_PLSR_MIR")
+        png(paste0(getwd(), "/Plots_Boxplots_PLSR_MIR/", slprptr[p], ".png"))
+        print(boxplot(df.sel[,slprptr[p]], las = 2, xlab = slprptr[p], ylab = ""))
+        dev.off()
+
+        # Plot and print Biochar properties violin plots
+        violin_plot <- ggplot(data = df.sel, aes(x = "", y = !!sym(slprptr[p]))) +
+            geom_violin(fill = "skyblue", color = "blue") +  # Customize fill and border color
+            geom_boxplot(width = 0.1, fill = "white", color = "black") +  # Add box plot for reference
+            labs(x = "", y = slprptr[p]) +  # Customize axis labels
+            coord_flip() +  # Rotate plot by 90 degrees for horizontal orientation
+            theme_minimal() +  # Use a minimal theme
+            theme(axis.text.x = element_blank()) +  # Hide x-axis labels
+            ggtitle(paste("Violin Plot of", slprptr[p]))  # Add plot title
+
+        # Save plot as PNG
+        ggsave(paste0("Plots_Violinplots_PLSR_MIR/", slprptr[p], ".png"), plot = violin_plot)
+    } else {
+        print(paste("Skipping plotting for", slprptr[p], "due to insufficient data."))
+    }
+
+    # Split samples inside loop for variables with many NAs
+    set.seed(123)
+    pool <- df.sel[sample(nrow(df.sel), round(0.3 * nrow(df.sel), 0)), ]
+    pool <- pool[order(pool$SSN), ]
+    poolid <- pool$SSN
+
+    # Get calibration and validation datasets
+    val_df <- pool
+    cal_df1 <- subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+
+    # threshold to exclude the extreme 5% values
+    #KARARI UPDATE; 95% loses too many samples, changed to 99% 
+    #FUSI UPDATE: this initially used to exclude the high high or low low values from the cal and the val set independently. So I did the exclusion before the split to retain the 70/30 split
+    cal_df <- subset(cal_df1, cal_df1[, 2] > quantile(cal_df1[, 2], 0.10) & cal_df1[, 2] < quantile(cal_df1[, 2], 0.90))
+    val_df1 <- subset(df.sel, (df.sel$SSN %in% val_df$SSN))
+    val_df <- subset(val_df1, val_df1[, 2] > quantile(val_df1[, 2], 0.10) & val_df1[, 2] < quantile(val_df1[, 2], 0.90))
+
+    val_df <- setorder(val_df)
+    cal_df <- setorder(cal_df)
+
+    # Check if val_df is empty and there are more than 3 samples
+    if (nrow(val_df) > 3) {
+        # Subset pre-treated spectra by available reference data
+        val_spec <- spec_trt[is.element(spec_trt$SSN, val_df$SSN), ]
+        cal_spec <- spec_trt[is.element(spec_trt$SSN, cal_df$SSN), ]
+        cal_spec <- cal_spec[order(cal_spec$SSN), ]
+        val_spec <- val_spec[order(val_spec$SSN), ]
+
+        # Get number of calibration and validation datasets
+        N_cal <- nrow(cal_spec)
+        N_val <- nrow(val_spec)
+
+        # Model data
+        Xcal.f <- cal_spec[, -1]
+        Xval.f <- val_spec[, -1]
+        dfcal.f <- cal_df[, -1]
+        dfval.f <- val_df[, -1]
+
+        # Adjust the maxc to ensure it does not exceed the number of rows in Xcal.f or the selected number of components
+        maxc <- 25
+        maxc <- min(maxc, nrow(Xcal.f) - 1)
+
+        # Check if the number of components is valid based on the size of Xcal.f
+        if (maxc > 0) {
+            # FUSI EDIT: max was 25
+          
+          # Check if the number of segments exceeds the number of observations
+          num_segments <- min(10, N_cal)
+            
+          pls.md <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp = maxc, validation = "CV", segments = num_segments) # 10-fold CV
+
+            # Plot RMSEP vs. number of components
+            plot(pls.md, "val", main = slprptr[p])
+            dir.create("Components_plots_PLSR_MIR")
+            png(paste0(getwd(), "/Components_plots_PLSR_MIR/", slprptr[p], ".png"))
+            print(plot(pls.md, "val", main = slprptr[p]))
+            dev.off()
+        } else {
+            stop(paste("Invalid number of components for", slprptr[p], ": maxc is set to", maxc))
+        }
+
+        # Manually selecting the number of components
+        nc <- nc_df$nc[which(nc_df$SSN == slprptr[p])]
+
+        # Ensure that the selected nc does not exceed the number of samples in the validation dataset
+        if (nc >= N_val) {
+            warning(paste("Selected number of components (nc =", nc, ") exceeds or equals the number of validation samples (N_val =", N_val, "). Reducing nc to ", N_val - 1, sep=""))
+            nc <- N_val - 1  # Reducing nc to be one less than the number of validation samples
+        }
+
+        # Generate relevant model name
+        md.nm <- paste0("pls.md.", slprptr[p], ".nc", nc)
+
+        # Rename model with the looped Biochar property
+        assign(x = md.nm, value = get("pls.md", pos = .GlobalEnv), pos = .GlobalEnv)
+
+        # Predict to validation dataset
+        pls.prd <- predict(pls.md, ncomp = nc, newdata = Xval.f)
+
+        # Return prediction statistics
+        val.stats <- round(goof(dfval.f, pls.prd, type = "spec"), 3)
+        val.stats <- bind_cols(Property = paste0(Property = slprptr[p], "_val"), Comps = "", N = N_val, val.stats)
+
+        # Calibration statistics
+        pls.pc <- predict(pls.md, ncomp = nc, newdata = Xcal.f)
+        pls.cal <- round(goof(dfcal.f, pls.pc, type = "spec"), 3)
+        cal.stats <- bind_cols(Property = paste0(Property = slprptr[p], "_cal"), Comps = as.character(nc), N = N_cal, pls.cal)
+
+        # Get model statistics
+        mdstats <- bind_rows(cal.stats, val.stats)
+
+        # Create model stats labels for the plot
+        # FUSI EDIT: Removed comps from before N because plot was crowded should add back in and only remove in plot below 
+        slct.stats <- as.data.frame(t(mdstats[, c("Property", "N", "R2", "RMSE", "bias", "RPIQ")]))
+        names(slct.stats) <- NULL
+        slct.stats <- bind_cols(rownames(slct.stats), slct.stats[, 2])
+
+        # FUSI EDIT: added "comps" because it is in slct.stats 
+        valbls <- paste0(c("N", "R2", "RMSE", "bias", "RPIQ"), "\n")
+        valsts <- paste0(c(slct.stats[2, 2], slct.stats[3, 2], slct.stats[4, 2], slct.stats[5, 2], slct.stats[6, 2]))
+        valstats <- paste(valbls, valsts)
+
+
+# Bind all looped properties model stats
+mdl.stats <- bind_rows(mdl.stats, mdstats)
+
+lgth <- length(sort(dfval.f, decreasing = F))
+
+seq.int(sort(dfval.f, decreasing = F)[1], sort(dfval.f, decreasing = F)[lgth], length.out = 4)
+
+# Check if there is sufficient data for plotting
+if (length(dfval.f) > 0) {
+    # Plot validation plot
+    plot(dfval.f, pls.prd, pch = 10,
+         xlab = paste('Measured', names(val_df)[2], sep = "_"),
+         ylab = paste('Predicted', names(val_df)[2], sep = "_"), 
+         xlim = range(c(dfval.f, pls.prd)),
+         ylim = range(c(dfval.f, pls.prd)),
+         mtext(valstats[-1], side = 3, at = c(seq.int(sort(dfval.f, decreasing = F)[1], sort(dfval.f, decreasing = F)[lgth], length.out = 4)))
+    )   ## plot the predicted vs. measured in the validation
+    abline(a = 0, b = 1)
+    
+    dir.create("Plots_Validationplots_PLSR_MIR")
+    png(paste0(getwd(), "/Plots_Validationplots_PLSR_MIR/", slprptr[p], ".png"))
+    print(plot(dfval.f, pls.prd, pch = 10,
+               xlab = paste('Measured', names(val_df)[2], sep = "_"),
+               ylab = paste('Predicted', names(val_df)[2], sep = "_"), 
+               xlim = range(c(dfval.f, pls.prd)),
+               ylim = range(c(dfval.f, pls.prd)),
+               mtext(valstats[-1], side = 3, at = c(seq.int(sort(dfval.f, decreasing = F)[1], sort(dfval.f, decreasing = F)[lgth], length.out = 4)))
+    ))
+    abline(a = 0, b = 1)
+    dev.off()
+} else {
+    warning(paste("No data points remaining after filtering for", slprptr[p], "- skipping validation plot."))
+}
+
+################### Predict all samples #########################
+prd.smpls <- predict(pls.md, spec_trt[,-1])
+
+prd <- as.data.frame(prd.smpls)
+df.prd <- bind_cols(SSN = rownames(prd), prd[, nc])
+colnames(df.prd) <- c("SSN", slprptr[p])
+
+pred <- merge(pred, df.prd, by = "SSN", all.x = TRUE)
+
+# FUSI EDIT: extracting top loadings
+
+# Extract loadings
+loadings <- pls.md$loadings
+
+# Get wavenumbers
+wavenumbers <- rownames(loadings)
+
+# # Plot wavenumbers vs. loadings
+# if (!is.null(loadings)) {
+#     wavenumbers_numeric <- as.numeric(gsub("`", "", wavenumbers))  # Remove backticks and convert to numeric
+#     plot(wavenumbers_numeric, loadings[, nc], type = "l", xlab = "Wavenumbers", ylab = "Loadings", main = paste("Wavenumbers vs. Loadings for", slprptr[p]), xlim = rev(range(wavenumbers_numeric)))
+#     png(paste0(getwd(), "/Wavenumbers_vs_Loadings_PLSR_MIR/", slprptr[p], "_loadings.png"))
+#     print(plot(wavenumbers_numeric, loadings[, nc], type = "l", xlab = "Wavenumbers", ylab = "Loadings", main = paste("Wavenumbers vs. Loadings for", slprptr[p]), xlim = rev(range(wavenumbers_numeric))))
+#     dev.off()
+# }
+
+# Identify the top loaded variables for each component
+top_loaded_variables_pc1 <- head(names(sort(abs(loadings[, 1]), decreasing = TRUE)), 30)
+top_loaded_variables_pc2 <- head(names(sort(abs(loadings[, 2]), decreasing = TRUE)), 30)
+
+# Remove single quotes
+top_loaded_variables_pc1 <- gsub("`|'", "", top_loaded_variables_pc1)
+top_loaded_variables_pc2 <- gsub("`|'", "", top_loaded_variables_pc2)
+
+# Place them in a dataframe 
+df_pc1 <- t(data.frame(as.numeric(top_loaded_variables_pc1), stringsAsFactors = FALSE))
+df_pc2 <- t(data.frame(as.numeric(top_loaded_variables_pc2), stringsAsFactors = FALSE))
+
+# Optionally, set the column names
+colnames(df_pc1) <- paste0("Loading_", 1:ncol(df_pc1))
+colnames(df_pc2) <- paste0("Loading_", 1:ncol(df_pc2))
+
+# Create data frame for PC1 loadings
+df_pc1_var <- data.frame(Response_Variable = slprptr[p])
+
+# Create data frame for PC2 loadings
+df_pc2_var <- data.frame(Response_Variable = slprptr[p])
+
+# Append data frames to the main data frames
+top_loadings_df_pc1 <- bind_rows(top_loadings_df_pc1, bind_cols(df_pc1_var, df_pc1))
+top_loadings_df_pc2 <- bind_rows(top_loadings_df_pc2, bind_cols(df_pc2_var, df_pc2))
+
+} else {
+    print(paste("Skipping testing parameter:", slprptr[p], "because val_df is empty."))
+}
+}
+# FUSI EDIT: End of for loop
+```
+
+## Saving and plotting
+
 ```{r}
 
 write.csv(top_loadings_df_pc1, paste0(getwd(),"/top_loadings_df_pc1_PLSR_MIR.csv"),row.names = F)
@@ -367,7 +936,6 @@ write.csv(top_loadings_df_pc2, paste0(getwd(),"/top_loadings_df_pc2_PLSR_MIR.csv
 ## Plotting properties with threshold metrics
 
 ```{r}
-
 
 # Add two new columns based on whether the Property contains "_val" or "_cal"
 mdl.stats_PLSR_MIR <- mdl.stats %>%
@@ -424,7 +992,10 @@ cal_val_top_plot <-ggplot(mdl.stats_filtered_0_6 , aes(x = Property_Name, y = R2
         panel.grid.minor = element_blank(),  # Remove minor gridlines
         axis.line = element_line(color = "black"),  # Add axis lines
         axis.title = element_text(size = 14),  # Adjust axis title font size
-        axis.text = element_text(size = 12))  # Adjust axis text siz
+        axis.text = element_text(size = 12))  # Adjust axis text size
+
+#view top plot 
+cal_val_top_plot
 # Save the plot
 ggsave(paste0(getwd(), "/cal_val_PLSR_MIR", ".png"),
        plot = cal_val_top_plot,
@@ -606,3 +1177,5 @@ cal_val_basic_C_plot
 
 ggsave(paste0(getwd(),"/cal_val_basic_C_plot.png"))
 ```
+
+## 

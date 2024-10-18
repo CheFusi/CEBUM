@@ -1,0 +1,457 @@
+---
+title: "CEBUM_PLSR_Workflow"
+output: html_document
+date: "2024-10-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{# {r setup, include=TRUE}
+# 
+# #If package ithir is not available for your version of R
+# #Use the 3 below lines to install package ithir
+# # install.packages("devtools") 
+# # library(devtools)
+# # install_bitbucket("brendo1001/ithir/pkg") or devtools::install_bitbucket("brendo1001/ithir/pkg")
+# 
+# #ithir used to extract model statistics like RMSE etc.
+# #using a function called: goof: see here: https://rdrr.io/rforge/ithir/src/R/goof.R 
+# 
+# ## To install that works with tidymodels
+# 
+#   # if (!require("remotes", quietly = TRUE)) {
+#   #   install.packages("remotes")
+#   # }
+#   # 
+#   # remotes::install_bioc("mixOmics")
+# 
+# # Define a list of required packages
+# required_packages <- c("randomForest", "caret", "pls","data.table","ithir", 
+#                        "dplyr", "tidyr", "prospectr", "globals", "stringr", 
+#                        "ggplot2","here","tidymodels","parsnip", "plsmod","mixOmics"
+#                        ,"yardstick","purrr", "tibble")
+# 
+# for (pkg in required_packages) {
+#   if (!requireNamespace(pkg, quietly = TRUE)) {
+#     install.packages(pkg)
+#   }
+#   suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+# }
+# 
+# #cat("\014")
+
+```
+
+```{r}
+
+# Manually load each package
+library(randomForest)
+library(caret)
+library(pls)
+library(data.table)
+library(ithir)
+library(dplyr)
+library(tidyr)
+library(prospectr)
+library(globals)
+library(stringr)
+library(ggplot2)
+library(here)
+library(tidymodels)
+library(parsnip)
+library(plsmod)
+library(mixOmics)
+library(yardstick)
+library(purrr)
+library(tibble)
+```
+
+#### Load reference data
+
+```{r}
+
+
+# 
+spec_trt <- readRDS("spec_trt_MIR.RDS")
+spec_trt <- spec_trt[,-2] #removing the data for the first wavenumber since it's all NAN's
+
+
+df.f<-readRDS("df.f.RDS")
+ 
+```
+
+```{r, echo=FALSE}
+
+#Available properties to predict
+#Incase you want to predict only selected properties,
+#get property position by running line 66. Remove hash sign between ")" and "["
+#symbols on line 67. Edit properties position and run line 67.
+#Always ensure position 1 in always included.
+
+#FUSI EDIT 
+# changed the call to reference df.f and not df1 because df.f has columns removed for samples that don't have enough data 
+# also removed the columns for char and char type
+
+#names(df.f)
+slprptr<-names(df.f[-c(2:9)]) #FUSI EDIT: removing metadata columns 
+
+#creating a df with the number of components so I can manually define the
+# nc_df <- data.frame (SSN=slprptr[-1],
+#                        nc=NA)
+# nc_df <- nc_df[order(nc_df$SSN), ]
+# write.csv(nc_df, paste0(getwd(),"/nc_df.csv"),row.names = F)
+
+nc_df <-read.csv("nc_df.csv")
+
+pred<-as.data.frame(spec_trt[,1])
+colnames(pred)<-"SSN"
+```
+
+#### Defining functions
+
+1.  create directories
+
+Within the for loop
+
+2.  Step 1: Create directories and empty containers
+3.  Step 2: select properties and filter extremes
+4.  Step 3: Define calibration and validation datasets
+5.  Step 4:
+6.  
+7.  
+
+```{r}
+
+# Step 1: Initialize directories and empty objects to store results
+initialize_workspace <- function() {
+  # Create directories for different types of plots and results
+  dir.create("Wavenumbers_vs_Loadings_PLSR_MIR", showWarnings = FALSE)
+  dir.create("Plots_Boxplots_PLSR_MIR", showWarnings = FALSE)
+  dir.create("Components_plots_PLSR_MIR", showWarnings = FALSE)
+  dir.create("Plots_Validation_PLSR_MIR_Workflow", showWarnings = FALSE)
+  
+  # Initialize an empty dataframe to accumulate metrics for all properties
+  all_metrics <<- tibble()  # <<- assigns the variable to the global environment
+}
+
+# Step 2: Select and filter data based on the property of interest
+select_property_data <- function(slprptr, p, df.f, spec_trt) {
+  df.sel <- df.f %>%
+    filter(SSN %in% spec_trt$SSN) %>%
+    select(SSN, Source, all_of(slprptr[p])) %>%
+    left_join(spec_trt, by = "SSN") %>%
+    na.omit() %>%
+    filter(data.table::between(.[[3]], quantile(.[[3]], 0.05), quantile(.[[3]], 0.95))) %>%
+    tibble::column_to_rownames(var = "SSN")
+  return(df.sel)
+}
+
+# Step 3: Split data into calibration (training) and validation sets
+split_data <- function(df.sel) {
+  trainIndex <- createDataPartition(df.sel$Source, p = 0.7, list = FALSE)
+  df.sel <- df.sel %>% select(-Source)
+  cal_ids <- rownames(df.sel)[trainIndex]
+  val_ids <- rownames(df.sel)[-trainIndex]
+  cal_df <- df.sel %>% filter(rownames(.) %in% cal_ids) %>% arrange(rownames(.))
+  val_df <- df.sel %>% filter(rownames(.) %in% val_ids) %>% arrange(rownames(.))
+  return(list(cal_df = cal_df, val_df = val_df))
+}
+
+# Step 4: Prepare the model data for training and testing
+prepare_model_data <- function(cal_df, val_df) {
+  train_data <- cal_df %>% tibble::rownames_to_column(var = "SSN")
+  test_data <- val_df %>% tibble::rownames_to_column(var = "SSN")
+  return(list(train_data = train_data, test_data = test_data))
+}
+
+# Step 15: Predict on the calibration and validation datasets
+predict_on_datasets <- function(pls_fit, train_data, test_data) {
+  cal_predictions <- predict(pls_fit, new_data = train_data)
+  val_predictions <- predict(pls_fit, new_data = test_data)
+  return(list(cal_predictions = cal_predictions, val_predictions = val_predictions))
+}
+
+# Step 16: Calculate performance metrics for the model (calibration and validation)
+calculate_metrics <- function(data, predictions, data_type, slprptr, p, best_num_comp) {
+  r2_value <- rsq_vec(truth = data[[slprptr[p]]], estimate = predictions$.pred)
+  rmse_value <- rmse_vec(truth = data[[slprptr[p]]], estimate = predictions$.pred)
+  mse_value <- mean((data[[slprptr[p]]] - predictions$.pred)^2)
+  bias_value <- mean(data[[slprptr[p]]] - predictions$.pred)
+  rpd_value <- sd(data[[slprptr[p]]]) / rmse_value
+  rpiq_value <- IQR(data[[slprptr[p]]]) / rmse_value
+
+  return(tibble(
+    Property = slprptr[p],
+    Data_Type = data_type,
+    Comps = best_num_comp$num_comp,
+    N = nrow(data),
+    R2 = r2_value,
+    MSE = mse_value,
+    RMSE = rmse_value,
+    bias = bias_value,
+    RPD = rpd_value,
+    RPIQ = rpiq_value
+  ))
+}
+
+# Step 17: Plot measured vs predicted values for the validation set
+plot_predictions <- function(val_plot_data, val_df, slprptr, p, combined_metrics) {
+  val_metrics <- combined_metrics %>% filter(Data_Type == "Validation")
+  
+  validation_plot <- ggplot(val_plot_data, aes(x = !!sym(slprptr[p]), y = .pred)) +
+    geom_point(color = "blue", size = 2) +
+    geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+    labs(title = paste("Measured vs Predicted for", slprptr[p]),
+         x = paste('Measured', names(val_df)[1], sep = "_"),
+         y = paste('Predicted', names(val_df)[1], sep = "_")) +
+    theme_minimal() +
+    coord_fixed() +
+    annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.5,
+             label = paste(
+               "Comps:", val_metrics$Comps,
+               "\nN:", val_metrics$N,
+               "\nR2:", round(val_metrics$R2, 3),
+               "\nRMSE:", round(val_metrics$RMSE, 3),
+               "\nBias:", round(val_metrics$bias, 3)),
+             size = 4, color = "black")
+
+  plot_path <- paste0(getwd(), "/Plots_Validation_PLSR_MIR_Workflow/", slprptr[p], ".png")
+  ggsave(plot_path, plot = validation_plot, width = 7, height = 7, dpi = 300)
+  print(validation_plot)
+}
+
+# Step 18: Plot well-fitted properties
+# Function to plot all well-fitted properties on a grouped bar plot
+plot_well_fitted_properties <- function(all_metrics) {
+  
+  # Filter properties that are NOT overfitted (R² drop <= 15% and RMSE increase <= 20%)
+  well_fitted_properties <- all_metrics %>%
+    group_by(Property) %>%
+    reframe(
+      R2_cal = R2[Data_Type == "Calibration"],
+      R2_val = R2[Data_Type == "Validation"],
+      RMSE_cal = RMSE[Data_Type == "Calibration"],
+      RMSE_val = RMSE[Data_Type == "Validation"],
+      R2_diff = (R2_cal - R2_val) / R2_cal,
+      RMSE_ratio = RMSE_val / RMSE_cal
+    ) %>%
+    filter(R2_diff <= 0.15 & RMSE_ratio <= 1.20) %>%
+    pull(Property)  # Get the list of well-fitted properties
+  
+  # Subset all_metrics to keep only the well-fitted properties
+  well_fitted_metrics <- all_metrics %>%
+    filter(Property %in% well_fitted_properties)
+  
+  # Prepare data for plotting: Combine Calibration and Validation for both R² and RMSE
+  plot_data <- well_fitted_metrics %>%
+    pivot_longer(cols = c("R2", "RMSE"), names_to = "Metric", values_to = "Value")
+  
+  # Create a combined grouped bar plot for both R² and RMSE
+  if (nrow(plot_data) == 0) {
+    message("No well-fitted properties to plot.")
+  } else {
+    # Proceed with plotting
+    ggplot(plot_data, aes(x = Property, y = Value, fill = Data_Type)) +
+      geom_bar(stat = "identity", position = "dodge") +
+      facet_wrap(~ Metric, scales = "free_y", nrow = 2) +  # Separate panels for R² and RMSE
+      scale_fill_manual(values = c("Calibration" = "purple", "Validation" = "darkgreen")) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1)) +  # Adjust text angle for readability
+      labs(title = "R² and RMSE Comparison for Well-Fitted Properties",
+           subtitle = "Purple: Calibration | Green: Validation",
+           y = "Value",
+           x = "Property") +
+      theme_minimal()
+  }
+}
+
+
+
+```
+
+```{r}
+# 
+# # Initialize workspace (directories and empty metrics dataframe)
+# initialize_workspace()
+# 
+# for (p in 92:length(slprptr)) {
+#   
+#   # Step 2: Select property data
+#   df.sel <- select_property_data(slprptr, p, df.f, spec_trt)
+#   
+#   # Step 3: Split data into calibration and validation datasets
+#   split <- split_data(df.sel)
+#   cal_df <- split$cal_df
+#   val_df <- split$val_df
+#   
+#   if (nrow(cal_df) <= 4 || nrow(val_df) <= 4) {
+#   message(paste("Skipping property:", slprptr[p], "due to insufficient data"))
+#   next
+#   }
+#   
+#     # Step 4: Prepare data for modeling
+#     data_prep <- prepare_model_data(cal_df, val_df)
+#     train_data <- data_prep$train_data
+#     test_data <- data_prep$test_data
+#     
+#     # Step 5: Create the recipe (This step remains in the loop)
+#     biochar_recipe <- recipe(as.formula(paste(slprptr[p], "~ .")), data = train_data) %>%
+#       update_role(SSN, new_role = "ID") %>%
+#       step_naomit(all_predictors())
+#   
+#     # Step 6: Define the PLS model with tuning
+#     pls_model_spec <- pls() %>%
+#       set_mode("regression") %>%
+#       set_engine("mixOmics") %>%
+#       set_args(num_comp = tune())  
+#   
+#     # Step 7: Create the workflow
+#     biochar_workflow <- workflow() %>%
+#       add_recipe(biochar_recipe) %>%
+#       add_model(pls_model_spec)
+#   
+#     # Step 8: Define cross-validation strategy
+#     cv_folds <- vfold_cv(train_data, v = min(10, nrow(train_data) - 1))
+#     
+#     # Step 9: Tune the model to minimize RMSE
+#     num_comp_grid <- tibble(num_comp = 1:min(nrow(val_df) - 1, nrow(train_data) - 1))
+#     tune_results <- tune_grid(
+#       biochar_workflow,
+#       resamples = cv_folds,
+#       grid = num_comp_grid,
+#       metrics = metric_set(rmse),
+#       control = control_grid(save_pred = TRUE)
+#     )
+#   
+#     # Step 10: Select the best number of components based on RMSE
+#     best_num_comp <- tune_results %>%
+#       select_best(metric ="rmse") %>%
+#       select(num_comp) 
+#   
+#     # Step 11: Finalize the workflow with the best model
+#     final_workflow <- finalize_workflow(biochar_workflow, best_num_comp)
+#   
+#     # Step 12: Fit the final workflow
+#     pls_fit <- fit(final_workflow, data = train_data)
+#   
+#     # Step 13: Predict on the validation set
+#     pls_predictions <- predict(pls_fit, new_data = test_data)
+#     
+#     # Step 15: Predict on calibration and validation datasets
+#     predictions <- predict_on_datasets(pls_fit, train_data, test_data)
+#     cal_predictions <- predictions$cal_predictions
+#     val_predictions <- predictions$val_predictions
+#     
+#     # Step 16: Calculate model metrics
+#     cal_metrics <- calculate_metrics(train_data, cal_predictions, "Calibration", slprptr, p, best_num_comp)
+#     val_metrics <- calculate_metrics(test_data, val_predictions, "Validation", slprptr, p, best_num_comp)
+#     
+#     combined_metrics <- bind_rows(cal_metrics, val_metrics)
+#     
+#     # Accumulate metrics for all properties
+#     all_metrics <- bind_rows(all_metrics, combined_metrics)
+#     
+#     # Step 17: Plot predictions for validation data
+#     val_plot_data <- bind_cols(test_data %>% select(SSN, !!sym(slprptr[p])), val_predictions)
+#     plot_predictions(val_plot_data, val_df, slprptr, p, combined_metrics)
+#   } 
+# 
+# # Step 18: Plot well-fitted properties after the loop
+# plot_well_fitted_properties(all_metrics)
+```
+
+Purrrr - removing for loop
+
+```{r}
+
+# Initialize workspace (directories and empty metrics dataframe)
+initialize_workspace()
+
+# Define a function that performs the entire workflow for one property
+process_property <- function(p, slprptr, df.f, spec_trt) {
+  # Step 2: Select property data
+  df.sel <- select_property_data(slprptr, p, df.f, spec_trt)
+  
+  # Step 3: Split data into calibration and validation datasets
+  split <- split_data(df.sel)
+  cal_df <- split$cal_df
+  val_df <- split$val_df
+  
+  if (nrow(cal_df) <= 4 || nrow(val_df) <= 4) {
+    message(paste("Skipping property:", slprptr[p], "due to insufficient data"))
+    return(NULL)  # Skip this property if there's not enough data
+  }
+  
+  # Step 4: Prepare data for modeling
+  data_prep <- prepare_model_data(cal_df, val_df)
+  train_data <- data_prep$train_data
+  test_data <- data_prep$test_data
+  
+  # Step 5: Create the recipe (This step remains in the loop)
+  biochar_recipe <- recipe(as.formula(paste(slprptr[p], "~ .")), data = train_data) %>%
+    update_role(SSN, new_role = "ID") %>%
+    step_naomit(all_predictors())
+  
+  # Step 6: Define the PLS model with tuning
+  pls_model_spec <- pls() %>%
+    set_mode("regression") %>%
+    set_engine("mixOmics") %>%
+    set_args(num_comp = tune())  
+  
+  # Step 7: Create the workflow
+  biochar_workflow <- workflow() %>%
+    add_recipe(biochar_recipe) %>%
+    add_model(pls_model_spec)
+  
+  # Step 8: Define cross-validation strategy
+  cv_folds <- vfold_cv(train_data, v = min(10, nrow(train_data) - 1))
+  
+  # Step 9: Tune the model to minimize RMSE
+  num_comp_grid <- tibble(num_comp = 1:min(nrow(val_df) - 1, nrow(train_data) - 1))
+  tune_results <- tune_grid(
+    biochar_workflow,
+    resamples = cv_folds,
+    grid = num_comp_grid,
+    metrics = metric_set(rmse),
+    control = control_grid(save_pred = TRUE)
+  )
+  
+  # Step 10: Select the best number of components based on RMSE
+  best_num_comp <- tune_results %>%
+    select_best(metric ="rmse") %>%
+    select(num_comp) 
+  
+  # Step 11: Finalize the workflow with the best model
+  final_workflow <- finalize_workflow(biochar_workflow, best_num_comp)
+  
+  # Step 12: Fit the final workflow
+  pls_fit <- fit(final_workflow, data = train_data)
+  
+  # Step 13: Predict on the validation set
+  pls_predictions <- predict(pls_fit, new_data = test_data)
+  
+  # Step 15: Predict on calibration and validation datasets
+  predictions <- predict_on_datasets(pls_fit, train_data, test_data)
+  cal_predictions <- predictions$cal_predictions
+  val_predictions <- predictions$val_predictions
+  
+  # Step 16: Calculate model metrics
+  cal_metrics <- calculate_metrics(train_data, cal_predictions, "Calibration", slprptr, p, best_num_comp)
+  val_metrics <- calculate_metrics(test_data, val_predictions, "Validation", slprptr, p, best_num_comp)
+  
+  combined_metrics <- bind_rows(cal_metrics, val_metrics)
+  
+  # Step 17: Plot predictions for validation data
+  val_plot_data <- bind_cols(test_data %>% select(SSN, !!sym(slprptr[p])), val_predictions)
+  plot_predictions(val_plot_data, val_df, slprptr, p, combined_metrics)
+  
+  return(combined_metrics)  # Return metrics for this property
+}
+
+# Use purrr::map to apply the function to all properties
+all_metrics <- map_dfr(2:length(slprptr), ~ process_property(.x, slprptr, df.f, spec_trt))
+
+# Step 18: Plot well-fitted properties after the loop
+plot_well_fitted_properties(all_metrics)
+```

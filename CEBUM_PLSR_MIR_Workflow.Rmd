@@ -34,10 +34,6 @@ spec_trt <- spec_trt[,-2] #removing the data for the first wavenumber since it's
 
 # biochar property data
 df.f<-readRDS("df.f.RDS")
- 
-```
-
-```{r, echo=FALSE}
 
 # df.f: full dataset;
 # spec_trt: treated spectra
@@ -48,6 +44,7 @@ slprptr<-names(df.f[-c(2:9)]) #FUSI EDIT: removing metadata columns
 # defining identity object with names of biochar samples
 pred<-as.data.frame(spec_trt[,1])
 colnames(pred)<-"SSN"
+ 
 ```
 
 ## PLSR ( & RF) Base model
@@ -69,12 +66,6 @@ High-Level Structure:
 
 6.  Comparing the models (optional step for comparing PLS vs Random Forest)
 ```
-
-### Base model 1
-
-#### Tune to minimize RMSEP
-
-selecting the number of components that minimizes the RMSEP
 
 ```{r}
 
@@ -167,76 +158,7 @@ setup_model <- function(model_type, train_data = NULL) {
   return(list(model_spec = model_spec, mtry_range = mtry_range))
 }
 
-# Function to fit and tune the model (PLS or Random Forest) based on RMSE
-fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type) {
-  model_spec <- model_spec_list$model_spec
-  mtry_range <- model_spec_list$mtry_range  # Only for Random Forest
-  
-  # Set up workflow with recipe and model
-  biochar_workflow <- workflow() %>%
-    add_recipe(recipe) %>%
-    add_model(model_spec)
-  
-  # Define cross-validation folds based on sample size
-  cv_folds <- if (nrow(train_data) <= 10) {
-    vfold_cv(train_data, v = nrow(train_data))  # Leave-One-Out CV if samples are <= 10
-  } else {
-    vfold_cv(train_data, v = 10)  # 10-fold CV for > 10 samples
-  }
-  
-  # Model-specific tuning grid and selection based on RMSE
-  if (model_type == "pls") {
-    # Tuning grid for PLS components
-    num_comp_grid <- tibble(num_comp = 1:min(nrow(test_data) - 1, 25)) # test between 1 and the number of validation samples -1 or 25
-    tune_results <- tune_grid(
-      biochar_workflow,
-      resamples = cv_folds,
-      grid = num_comp_grid,
-      metrics = metric_set(rmse),
-      control = control_grid(save_pred = TRUE)
-    )
-    best_params <- tune_results %>% select_best(metric = "rmse") %>% dplyr::select(num_comp)
-    final_workflow <- finalize_workflow(biochar_workflow, best_params)
-  } else if (model_type == "random_forest") {
-    # Tuning grid for Random Forest model parameters
-    rf_grid <- grid_regular(mtry_range, min_n(), levels = 5)
-    tune_results <- tune_grid(
-      biochar_workflow,
-      resamples = cv_folds,
-      grid = rf_grid,
-      metrics = metric_set(rmse),
-      control = control_grid(save_pred = TRUE)
-    )
-    best_params <- tune_results %>% select_best(metric = "rmse")
-    final_workflow <- finalize_workflow(biochar_workflow, best_params)
-  }
-  
-  # Fit the model with optimal parameters and handle any prediction errors
-  model_fit <- fit(final_workflow, data = train_data)
-  train_predictions <- tryCatch({
-    predict(model_fit, new_data = train_data)
-  }, error = function(e) {
-    message("Error in train_predictions: ", e)
-    return(NULL)
-  })
-  
-  test_predictions <- tryCatch({
-    predict(model_fit, new_data = test_data)
-  }, error = function(e) {
-    message("Error in test_predictions: ", e)
-    return(NULL)
-  })
-  
-  # Ensure predictions are non-null; otherwise, return error message
-  if (is.null(train_predictions) || is.null(test_predictions)) {
-    stop("Prediction failed: check data dimensions or NA values in predictor matrix.")
-  }
-  
-  return(list(model = model_fit,
-              train_predictions = train_predictions,
-              test_predictions = test_predictions,
-              best_params = best_params))
-}
+#***** 
 
 # Function to fit both models (PLS and Random Forest) for comparison
 fit_both_models <- function(train_data, test_data, recipe) {
@@ -329,12 +251,13 @@ plot_well_fitted_r2 <- function(all_metrics) {
     rename(Value = R2)  # Rename R² column to 'Value' for easier plotting
   
   # Generate the plot and store it in a variable
+  # Adjust the ggplot code for better label visibility
   well_fitted_plot <- ggplot(plot_data, aes(x = Property, y = Value, fill = Data_Type)) +
     geom_bar(stat = "identity", position = "dodge") +
     scale_fill_manual(values = c("Calibration" = "purple", "Validation" = "darkgreen")) +
     theme_minimal() +
     theme(
-      axis.text.x = element_text(angle = 60, hjust = 1, vjust = 1),
+      axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 8),  # Rotate labels and adjust size
       panel.grid = element_blank(),
       panel.border = element_rect(color = "black", fill = NA)
     ) +
@@ -361,7 +284,7 @@ run_all_properties <- function(slprptr, df.f, spec_trt) {
   initialize_workspace()  # Set up directories and metrics tibble
   
   # Loop through each property in slprptr, perform analysis, and collect metrics
-  all_metrics <- purrr::map_dfr(2:length(slprptr), function(index) {
+  all_metrics <- purrr::map_dfr(92:length(slprptr), function(index) {
     df.sel <- select_property_data(slprptr, index, df.f, spec_trt)  # Filter data for current property
     split <- split_data(df.sel)  # Split data into calibration and validation sets
     cal_df <- split$cal_df
@@ -370,7 +293,7 @@ run_all_properties <- function(slprptr, df.f, spec_trt) {
     # Check for sufficient data in both calibration and validation sets
     if (nrow(cal_df) <= 4 || nrow(val_df) <= 4) {
       message(paste("Skipping property:", slprptr[index], "due to insufficient data"))
-      return(NULL)
+      return(tibble(Property = slprptr[index], Data_Type = "Skipped", Model = NA, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
     }
     
     # Prepare model data and preprocess it
@@ -380,6 +303,11 @@ run_all_properties <- function(slprptr, df.f, spec_trt) {
     # Fit PLS model for current property
     model_spec <- setup_model("pls")$model_spec  # Using PLS model as an example
     model_fit <- fit_model(list(model_spec = model_spec), recipe_data$train_data, recipe_data$test_data, recipe_data$recipe, "pls")
+    
+    # If model_fit indicates "Skipped", skip further steps for this property
+    if ("Data_Type" %in% colnames(model_fit) && model_fit$Data_Type[1] == "Skipped") {
+      return(model_fit)  # Return skipped information
+    }
     
     # Predict on both calibration and validation sets
     cal_predictions <- predict(model_fit$model, new_data = recipe_data$train_data)
@@ -410,6 +338,86 @@ run_all_properties <- function(slprptr, df.f, spec_trt) {
   # Summarize results or perform additional analysis on `all_metrics` here
   plot_well_fitted_r2(all_metrics)
 }
+```
+
+### Base model 1
+
+#### Tune to minimize RMSEP
+
+selecting the number of components that minimizes the RMSEP
+
+```{r}
+
+# Function to fit and tune the model (PLS or Random Forest) based on RMSE
+fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type) {
+  model_spec <- model_spec_list$model_spec
+  mtry_range <- model_spec_list$mtry_range  # Only for Random Forest
+  
+  # Set up workflow with recipe and model
+  biochar_workflow <- workflow() %>%
+    add_recipe(recipe) %>%
+    add_model(model_spec)
+  
+  # Define cross-validation folds based on sample size
+  cv_folds <- if (nrow(train_data) <= 10) {
+    vfold_cv(train_data, v = nrow(train_data))  # Leave-One-Out CV if samples are <= 10
+  } else {
+    vfold_cv(train_data, v = 10)  # 10-fold CV for > 10 samples
+  }
+  
+  # Model-specific tuning grid and selection based on RMSE
+  if (model_type == "pls") {
+    # Tuning grid for PLS components
+    num_comp_grid <- tibble(num_comp = 1:min(nrow(test_data) - 1, 25)) # test between 1 and the number of validation samples -1 or 25
+    tune_results <- tune_grid(
+      biochar_workflow,
+      resamples = cv_folds,
+      grid = num_comp_grid,
+      metrics = metric_set(rmse),
+      control = control_grid(save_pred = TRUE)
+    )
+    best_params <- tune_results %>% select_best(metric = "rmse") %>% dplyr::select(num_comp)
+    final_workflow <- finalize_workflow(biochar_workflow, best_params)
+  } else if (model_type == "random_forest") {
+    # Tuning grid for Random Forest model parameters
+    rf_grid <- grid_regular(mtry_range, min_n(), levels = 5)
+    tune_results <- tune_grid(
+      biochar_workflow,
+      resamples = cv_folds,
+      grid = rf_grid,
+      metrics = metric_set(rmse),
+      control = control_grid(save_pred = TRUE)
+    )
+    best_params <- tune_results %>% select_best(metric = "rmse")
+    final_workflow <- finalize_workflow(biochar_workflow, best_params)
+  }
+  
+  # Fit the model with optimal parameters and handle any prediction errors
+  model_fit <- fit(final_workflow, data = train_data)
+  train_predictions <- tryCatch({
+    predict(model_fit, new_data = train_data)
+  }, error = function(e) {
+    message("Error in train_predictions: ", e)
+    return(NULL)
+  })
+  
+  test_predictions <- tryCatch({
+    predict(model_fit, new_data = test_data)
+  }, error = function(e) {
+    message("Error in test_predictions: ", e)
+    return(NULL)
+  })
+  
+  # Ensure predictions are non-null; otherwise, return error message
+  if (is.null(train_predictions) || is.null(test_predictions)) {
+    stop("Prediction failed: check data dimensions or NA values in predictor matrix.")
+  }
+  
+  return(list(model = model_fit,
+              train_predictions = train_predictions,
+              test_predictions = test_predictions,
+              best_params = best_params))
+}
 
 # Run analysis for all properties
 run_all_properties(slprptr, df.f, spec_trt)
@@ -425,35 +433,56 @@ run_all_properties(slprptr, df.f, spec_trt)
 
 # Calculate cumulative explained variance for each component with detailed print statements for troubleshooting
 calculate_explained_variance <- function(train_data, response_var, max_comps) {
-
-    # Ensure 'SSN' and the response variable are not included in the predictors (X)
+  # Prepare X and Y matrices
   X <- train_data %>%
     dplyr::select(-c(SSN, all_of(response_var))) %>%
     dplyr::mutate(across(everything(), as.numeric)) %>%
     as.matrix()
   
-  # Ensure Y is only the response variable data, converted to a numeric matrix
   Y <- train_data %>%
     dplyr::select(all_of(response_var)) %>%
     dplyr::mutate(across(everything(), as.numeric)) %>%
     as.matrix()
   
-#  # Print statements for troubleshooting
-#  print("Structure of predictor matrix X:")
-#  str(X)
-#  print("Structure of response matrix Y:")
-#  str(Y)
-  
-  # Fit the PLS model for a range of components and store explained variance
   variance_list <- purrr::map_dbl(1:max_comps, function(num_comp) {
-    model <- mixOmics::pls(X = X, Y = Y, ncomp = num_comp)
-    sum(model$explained_variance$X[1:num_comp])
+    model <- tryCatch(
+      mixOmics::pls(X = X, Y = Y, ncomp = num_comp),
+      error = function(e) {
+        message("Error in fitting PLS model: ", e)
+        return(NULL)
+      }
+    )
+    
+    if (is.null(model)) {
+      return(0)
+    }
+    
+    # Print all attributes of the model to understand its structure
+    print("Model prop_expl_var:")
+    print(model$prop_expl_var)
+    
+    # Check the contents of model$variates and model$loadings for variance information
+    # print("Model variates (scores):")
+    # print(head(model$variates$X))  # Scores for predictors
+    # print("Model loadings:")
+    # print(head(model$loadings$X))  # Loadings for predictors
+    
+    # Placeholder if we need to calculate cumulative variance manually
+     cumulative_variance <- 0
+    # print(paste("Number of components:", num_comp, "- Cumulative variance:", cumulative_variance))
+    # cumulative_variance
   })
+  
+  #Display final cumulative variance list for debugging
+  print("Cumulative variance list:")
+  print(variance_list)
   
   return(variance_list)
 }
 
-fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type, cumulative_variance_threshold = 0.9) {
+
+
+fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type, cumulative_variance_threshold = 0.6) {
   model_spec <- model_spec_list$model_spec
   mtry_range <- model_spec_list$mtry_range  # Only for Random Forest
   
@@ -476,8 +505,18 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
     
     # Check if num_comp is missing or NULL and handle it
     if (is.na(num_comp) || is.null(num_comp)) {
-      warning("No components meet the cumulative variance threshold; setting num_comp to 1 as a default.")
-      num_comp <- 1
+      message(paste("Skipping property:", response_var, "due to insufficient cumulative variance."))
+      # Return a tibble indicating the property was skipped
+      return(tibble(
+        Property = response_var, 
+        Data_Type = "Skipped", 
+        Model = model_type, 
+        N = NA,
+        R2 = NA, 
+        RMSE = NA, 
+        bias = NA,
+        ncomp = NA  # Include ncomp to maintain compatibility with downstream processing
+      ))
     }
     
     # Set num_comp in your workflow's tuning grid
@@ -527,4 +566,142 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
 
 # Run analysis for all properties
 run_all_properties(slprptr, df.f, spec_trt)
+```
+
+```{r}
+
+calculate_explained_variance <- function(train_data, response_var, max_comps) {
+  # Prepare X and Y matrices
+  X <- train_data %>%
+    dplyr::select(-c(SSN, all_of(response_var))) %>%
+    dplyr::mutate(across(everything(), as.numeric)) %>%
+    as.matrix()
+  
+  Y <- train_data %>%
+    dplyr::select(all_of(response_var)) %>%
+    dplyr::mutate(across(everything(), as.numeric)) %>%
+    as.matrix()
+  
+  variance_list <- purrr::map_dbl(1:max_comps, function(num_comp) {
+    model <- tryCatch(
+      mixOmics::pls(X = X, Y = Y, ncomp = num_comp),
+      error = function(e) {
+        message("Error in fitting PLS model: ", e)
+        return(NULL)
+      }
+    )
+    
+    if (is.null(model)) {
+      return(0)
+    }
+    
+    # Check if prop_expl_var exists and use it to calculate cumulative variance
+    if (!is.null(model$prop_expl_var)) {
+      cumulative_variance <- sum(model$prop_expl_var$X[1:num_comp])
+      print(paste("Number of components:", num_comp, "- Cumulative variance:", cumulative_variance))
+      return(cumulative_variance)
+    } else {
+      # If prop_expl_var is missing, return 0 as a fallback
+      print("Warning: prop_expl_var not found in model")
+      return(0)
+    }
+  })
+  
+  # Display final cumulative variance list for debugging
+  print("Cumulative variance list:")
+  print(variance_list)
+  
+  return(variance_list)
+}
+
+
+
+
+
+
+fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type, cumulative_variance_threshold = 0.6) {
+  model_spec <- model_spec_list$model_spec
+  mtry_range <- model_spec_list$mtry_range  # Only for Random Forest
+  
+  # Set up workflow with recipe and model
+  biochar_workflow <- workflow() %>%
+    add_recipe(recipe) %>%
+    add_model(model_spec)
+  
+  # Check if PLS model, then calculate explained variance
+  if (model_type == "pls") {
+    # Set max_comps to 25 or one less than the number of samples in test_data
+    max_comps <- min(25, nrow(test_data) - 1)
+    
+    # Calculate cumulative explained variance up to max_comps
+    response_var <- colnames(train_data)[[2]]  # Adjust index if response var is at a different position
+    explained_variance <- calculate_explained_variance(train_data, response_var, max_comps)
+    
+    # Find the minimum number of components meeting the variance threshold
+    num_comp <- which(explained_variance >= cumulative_variance_threshold)[1]
+    
+    # Check if num_comp is missing or NULL and handle it
+    if (is.na(num_comp) || is.null(num_comp)) {
+      message(paste("Skipping property:", response_var, "due to insufficient cumulative variance."))
+      # Return a tibble indicating the property was skipped
+      return(tibble(
+        Property = response_var, 
+        Data_Type = "Skipped", 
+        Model = model_type, 
+        N = NA,
+        R2 = NA, 
+        RMSE = NA, 
+        bias = NA,
+        ncomp = NA  # Include ncomp to maintain compatibility with downstream processing
+      ))
+    }
+    
+    # Set num_comp in your workflow's tuning grid
+    final_workflow <- finalize_workflow(biochar_workflow, tibble(num_comp = num_comp))
+  } else if (model_type == "random_forest") {
+    # Set up Random Forest tuning grid if applicable
+    rf_grid <- grid_regular(mtry_range, min_n(), levels = 5)
+    tune_results <- tune_grid(
+      biochar_workflow,
+      resamples = vfold_cv(train_data, v = 10),  # 10-fold CV
+      grid = rf_grid,
+      metrics = metric_set(rmse),
+      control = control_grid(save_pred = TRUE)
+    )
+    best_params <- tune_results %>% select_best(metric = "rmse")
+    final_workflow <- finalize_workflow(biochar_workflow, best_params)
+  }
+  
+  # Fit and predict using the final workflow
+  model_fit <- fit(final_workflow, data = train_data)
+  train_predictions <- tryCatch({
+    predict(model_fit, new_data = train_data)
+  }, error = function(e) {
+    message("Error in train_predictions: ", e)
+    return(NULL)
+  })
+  
+  test_predictions <- tryCatch({
+    predict(model_fit, new_data = test_data)
+  }, error = function(e) {
+    message("Error in test_predictions: ", e)
+    return(NULL)
+  })
+  
+  # Ensure predictions are non-null; otherwise, return error message
+  if (is.null(train_predictions) || is.null(test_predictions)) {
+    stop("Prediction failed: check data dimensions or NA values in predictor matrix.")
+  }
+  
+  return(list(
+    model = model_fit,
+    train_predictions = train_predictions,
+    test_predictions = test_predictions,
+    best_params = tibble(num_comp = num_comp)
+  ))
+}
+
+# Run analysis for all properties
+run_all_properties(slprptr, df.f, spec_trt)
+
 ```

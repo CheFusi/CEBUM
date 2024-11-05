@@ -371,7 +371,6 @@ colnames(pred)<-"SSN"
 
 ```{r}
 
-
 #FUSI EDIT
 
 mdl.stats<-NULL#Model stats container
@@ -388,7 +387,7 @@ for(p in 3:length(slprptr)){
 #Select properties to predict one at a time and remove NAs  
 df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
 
-df.sel_ <-subset(df.sel, df.sel[,2]>quantile(df.sel[,2], 0.05)&df.sel[,2] <quantile(df.sel[,2], 0.95))
+df.sel <-subset(df.sel, df.sel[,2]>quantile(df.sel[,2], 0.05)&df.sel[,2] <quantile(df.sel[,2], 0.95))
 
 #Plot and print Biochar properties boxplots
 boxplot(df.sel[,slprptr[p]], las=2, xlab = slprptr[p], ylab = "")
@@ -411,16 +410,40 @@ violin_plot <- ggplot(data = df.sel, aes(x = "", y = !!sym(slprptr[p]))) +
 ggsave(paste0("Plots_Violinplots_PLSR_MIR/", slprptr[p], ".png"), plot = violin_plot)
 
 
-# #Split samples inside loop for variables with many NAs
-# #Set splitting proportion for the calibration and validation data
-set.seed(123)
-pool=df.sel[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
-pool<-pool[order(pool$SSN),]
-poolid<-pool$SSN
+# # #Split samples inside loop for variables with many NAs
+# # #Set splitting proportion for the calibration and validation data
+# set.seed(123)
+# pool=df.sel[sample(nrow(df.sel), round(0.3*nrow(df.sel),0)), ]
+# pool<-pool[order(pool$SSN),]
+# poolid<-pool$SSN
+# 
+# #Get calibration and validation datasets
+# val_df<-pool
+# cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
 
-#Get calibration and validation datasets
-val_df<-pool
-cal_df1 <-subset(df.sel, !(df.sel$SSN %in% val_df$SSN))
+# FUSI EDIT
+
+# Splitting the data such that the proportions of the source in the initial df are retained in both the calibration and the calidation df's
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Perform stratified sampling based on 'Source' from df.f
+# Create a stratified partition of indices
+trainIndex <- createDataPartition(df.f$Source, p = 0.7, list = FALSE)
+
+# Get SSNs for calibration and validation datasets
+cal_ids <- df.f$SSN[trainIndex]  # SSN for calibration set
+val_ids <- df.f$SSN[-trainIndex] # SSN for validation set
+
+# Now filter df.sel based on the SSNs from the stratified split
+cal_df1 <- df.sel[df.sel$SSN %in% cal_ids, ]
+val_df <- df.sel[df.sel$SSN %in% val_ids, ]
+
+# Optional: Sort the datasets by 'SSN'
+cal_df1 <- cal_df1[order(cal_df1$SSN), ]
+val_df <- val_df[order(val_df$SSN), ]
+
 
 # threshold to exclude the extreme 5% values
 #KARARI UPDATE; 95% loses too many samples, changed to 99% 
@@ -434,7 +457,7 @@ val_df<-setorder(val_df)
 cal_df<-setorder(cal_df)
 
  # Check if val_df is empty and there are more than 3
-  if (nrow(val_df) > 3) { 
+if (nrow(cal_df) > 3 && nrow(val_df) > 3) {
 
 #Subset pre-treated spectra by available reference data
 val_spec<-spec_trt[is.element(spec_trt$SSN, val_df$SSN),]
@@ -457,11 +480,13 @@ dfval.f=val_df[,-1]
 
 maxc <- 25
 maxc <- min(maxc, nrow(Xcal.f) - 1)
+nsegments <- 10 
+nsegments <- min(nsegments, nrow(Xcal.f) - 1)
 
 # Check if the number of components is valid based on the size of Xcal.f
 if (maxc > 0) {
     #FUSI EDIT: max was 25
-    pls.md <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp=maxc, validation = "CV", segments = 10) # 10-fold CV
+    pls.md <- plsr(dfcal.f ~ ., data = Xcal.f, ncomp=maxc, validation = "CV", segments = nsegments) # 10-fold CV
     # Each iteration of the cross-validation process involves training the model on 9 of the 10 segments and testing it on the remaining segment, repeating this process 10 times to ensure each segment is used as a test set once.
 
     ## plot RMSEP vs. number of components
@@ -618,12 +643,10 @@ colnames(df_pc2) <- paste0("Loading_", 1:ncol(df_pc2))
 
   
   } else {
-    print(paste("Skipping testing parameter:", slprptr[p], "because val_df is empty."))
+    print(paste("Skipping testing parameter:", slprptr[p], "because val_df or cal_df is empty or too small (< 3)."))
   }
 }
 #FUSI EDIT: End of for loop
-
-
 
 ```
 

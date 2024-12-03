@@ -18,7 +18,7 @@ knitr::opts_chunk$set(echo = TRUE)
 required_packages <- c("writexl","randomForest", "caret", "pls", "data.table", "ithir", 
                        "dplyr", "tidyr", "prospectr", "globals", "stringr", 
                        "ggplot2", "here", "tidymodels", "parsnip", "plsmod", 
-                       "mixOmics", "yardstick", "purrr", "tibble","ranger","VIM","shiny")
+                       "mixOmics", "yardstick", "purrr", "tibble","ranger","VIM","shiny","FNN")
 
 #VIM for KNN imputation
 # Load all required packages quietly without outputting any list of packages
@@ -80,7 +80,7 @@ High-Level Structure:
 # Initialize the workspace by creating directories for storing outputs and 
 # setting up an empty tibble to accumulate performance metrics 
 initialize_workspace <- function(identifier) {
-  dir.create(paste0("Plots_Validation_MIR_", identifier), showWarnings = FALSE)
+  #dir.create(paste0("Plots_Validation_MIR_", identifier), showWarnings = FALSE)
   dir.create(paste0("Plots_WellFitted_Properties_", identifier), showWarnings = FALSE)
   all_metrics <<- tibble()  # Global tibble to store metrics for each property
   
@@ -167,7 +167,7 @@ assign("val_df_global", val_df, envir = .GlobalEnv)
 }
 
 prepare_model_data <- function(cal_df, val_df, slprptr, .x) {
-  if (nrow(cal_df) <= 7 || nrow(val_df) <= 7) {
+  if (nrow(cal_df) <= 10 || nrow(val_df) <= 10) {
     warning("Insufficient rows in cal_df or val_df. Returning NA placeholders.")
     train_data <- cal_df
     test_data <- val_df
@@ -356,22 +356,22 @@ plot_predictions <- function(val_plot_data, val_df, slprptr, .x, combined_metric
   label_text <- paste("Comps:", val_metrics$Comps, "R²:", round(val_metrics$R2, 3))
 
   # Generate the plot
-  validation_plot <- ggplot(val_plot_data, aes_string(x = slprptr[.x], y = ".pred")) +
-    geom_point(color = "blue", size = 2) +
-    geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
-    labs(
-      title = paste("Measured vs Predicted for", slprptr[.x], "-", model_type),
-      x = paste("Measured", slprptr[.x]),
-      y = "Predicted"
-    ) +
-    theme_minimal() +
-    annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.5, label = label_text, size = 4)
+  # validation_plot <- ggplot(val_plot_data, aes_string(x = slprptr[.x], y = ".pred")) +
+  #   geom_point(color = "blue", size = 2) +
+  #   geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  #   labs(
+  #     title = paste("Measured vs Predicted for", slprptr[.x], "-", model_type),
+  #     x = paste("Measured", slprptr[.x]),
+  #     y = "Predicted"
+  #   ) +
+  #   theme_minimal() +
+  #   annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.5, label = label_text, size = 4)
 
   # Save the plot
-  ggsave(
-    filename = paste0("Plots_Validation_PLSR_MIR_", identifier, "/", slprptr[.x], "_", model_type, ".png"),
-    plot = validation_plot, width = 7, height = 7, dpi = 300
-  )
+  # ggsave(
+  #   filename = paste0("Plots_Validation_PLSR_MIR_", identifier, "/", slprptr[.x], "_", model_type, ".png"),
+  #   plot = validation_plot, width = 7, height = 7, dpi = 300
+  #)
 }
 
 # Plot R² values and differences for well-fitted properties based on model criteria
@@ -423,11 +423,17 @@ plot_well_fitted_r2 <- function(all_metrics, identifier) {
 
 # Wrapper function to run analysis for each property in slprptr with specified model_type (no default)
 run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier, 
-                                use_source = FALSE, source_name = NULL, tuning_goal = "rmsep") {
+                                use_source = FALSE, source_name = NULL, tuning_goal = "rmsep",
+                                property_range = 2:length(slprptr)) {
   all_metrics <<- tibble()  # Initialize global metrics storage
   
-  # Loop through each property and collect metrics
-  all_metrics <- purrr::map_dfr(2:length(slprptr), function(.x) {
+  # Validate the property_range parameter
+  if (any(property_range > length(slprptr) | property_range < 1)) {
+    stop("property_range contains indices outside the valid range of slprptr.")
+  }
+  
+  # Loop through each property in the specified range and collect metrics
+  all_metrics <- purrr::map_dfr(property_range, function(.x) {
     message("Processing property index: ", .x, " - Property: ", slprptr[.x])
     # Select and filter the property data
     property_data <- select_property_data(slprptr, .x, df1, spec_trt)
@@ -440,7 +446,7 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
     val_df <- split$val_df
     
     # Skip if the calibration or validation datasets have insufficient rows
-    if (nrow(cal_df) <= 7 || nrow(val_df) <= 7) {
+    if (nrow(cal_df) <= 10 || nrow(val_df) <= 10) {
       message(paste("Skipping property:", slprptr[.x], "due to insufficient data"))
       return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = NA, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
     }
@@ -456,7 +462,7 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
     }
     
     # Step 3: Skip properties with insufficient train/test data
-    if (nrow(data_prep$train_data) <= 7 || nrow(data_prep$test_data) <= 7) {
+    if (nrow(data_prep$train_data) <= 10 || nrow(data_prep$test_data) <= 10) {
       message(paste("Skipping property:", slprptr[.x], "due to insufficient train/test data"))
       return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = NA, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
     }
@@ -728,8 +734,6 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
 }
 ```
 
-test to catch incorrect number of dimensions error
-
 #### PLSR
 
 #### Tune to minimize RMSEP - MIR
@@ -741,7 +745,7 @@ Total split
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_totsplit_99perc")  # For RMSEP
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
                    use_source = FALSE, tuning_goal = "rmsep")
 ```
@@ -751,7 +755,7 @@ Source-based split
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_sourcesplit_99perc")  # For RMSEP
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
                    use_source = TRUE, tuning_goal = "rmsep")
 ```
@@ -761,7 +765,41 @@ Cornell only Predictions (focused on pH)
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_CornellOnlysplit_99perc")  # For RMSEP
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_CornellOnlysplit_99perc")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
+                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep")
+```
+
+#### Tune to minimize RMSEP - MIR 80/20 Split
+
+selecting the number of components that minimizes the RMSEP
+
+Total split
+
+```{r}
+
+# Run analysis for all properties
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_99perc_80_20")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
+                   use_source = FALSE, tuning_goal = "rmsep")
+```
+
+Source-based split
+
+```{r}
+
+# Run analysis for all properties
+identifier <- initialize_workspace("PLSR_RMSEP_sourcesplit_99perc_80_20")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
+                   use_source = TRUE, tuning_goal = "rmsep")
+```
+
+Cornell only Predictions (focused on pH)
+
+```{r}
+
+# Run analysis for all properties
+identifier <- initialize_workspace("PLSR_RMSEP_CornellOnlysplit_99perc_80_20")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep")
 ```
@@ -944,7 +982,7 @@ Total split
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_Variance_totsplit_99perc")  # For RMSEP
+identifier <- initialize_workspace("PLSR_Variance_MIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
                    use_source = FALSE, tuning_goal = "variance")
 ```
@@ -954,7 +992,7 @@ Source-based split
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_Variance_sourcesplit_99perc")  # For RMSEP
+identifier <- initialize_workspace("PLSR_Variance_MIR_sourcesplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
                    use_source = TRUE, tuning_goal = "variance")
 ```
@@ -964,7 +1002,7 @@ Cornell only Predictions (focused on pH)
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_Variance_CornellOnlysplit_99perc")  # For RMSEP
+identifier <- initialize_workspace("PLSR_Variance_MIR_CornellOnlysplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "variance")
 ```
@@ -1056,7 +1094,547 @@ Impute the entire dataset
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_totsplit_99perc_KNN5")  # For RMSEP
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_99perc_KNN5")  # For RMSEP
 run_all_properties(slprptr, df1_KNN5_impt, spec_trt, model_type = "pls", identifier, 
                    use_source = FALSE, tuning_goal = "rmsep")
+```
+
+#### Davis dataset
+
+Matching the feedstock ID between 2 datasets.
+
+```{r}
+
+# Load datasets
+user_data <- readRDS("df.f.RDS")
+davis_data <- read.csv("davis_data.csv")
+ 
+# Apply filtering
+entries_to_remove <- c(
+  "Enders et al., Bioresource Technology 114 (2012) 644-653.  ",
+  "Enders et al., Bioresource Technology 114 (2012) 644-653. ",
+  "Enders et al., Bioresource Technology 114 (2012) 644-653."
+)
+
+davis_data <- davis_data %>%
+  filter(!Reference %in% entries_to_remove)
+
+# Rename columns for consistency
+names(davis_data) <- str_replace_all(names(davis_data), "\\.+", "_")
+names(user_data) <- str_replace_all(names(user_data), "\\.+", "_")
+
+
+# Function to simplify feedstock strings
+
+simplify_feedstock <- function(feedstock) {
+  feedstock <- str_to_lower(feedstock) %>%
+    str_replace_all("sugar cane", "sugarcane") %>%  # Replace specific terms
+    str_replace_all("hard wood", "hardwood") %>% 
+    str_replace_all("soft wood", "softwood") %>% 
+    str_remove_all("\\(.*?\\)|[0-9]+|°c|\\bshells?\\b|\\bchar\\b|\\bwith\\b|\\bw\\/\\b|\\bpaste\\b|\\+") %>%
+    str_squish()  # Remove extra spaces
+  return(feedstock)
+}
+
+# Simplify feedstock strings in user_data
+user_data <- user_data %>%
+  mutate(Simplified_Feedstock = simplify_feedstock(paste(Feedstock, Class, Char, sep = " ")))
+
+# Simplify strings in the Davis dataset to broaden matching
+davis_data <- davis_data %>%
+  mutate(
+    Simplified_Feedstock = str_to_lower(
+      str_remove_all(
+        paste(Feedstock_Composition, Biochar_Name, Optional_comments_about_Feedstock, sep = " "),
+        "\\(.*?\\)|[0-9]+|°c"
+      )
+    ) %>%
+    str_replace_all("sugar cane", "sugarcane") %>%  # Replace specific terms
+    str_replace_all("hard wood", "hardwood") %>% 
+    str_replace_all("soft wood", "softwood") %>%
+    str_squish()  # Remove extra spaces
+  )
+
+primary_keywords <- c(
+  # From shells/fruit/nuts
+  "peanut", "pecan", "almond", "chestnut", "pistachio", "macadamia", "acorn", "hazelnut", "walnut", "nutshell",
+  "apricot", "plum", "orange", "pineapple", "grapeseed", "pomace", "olive", "palm_kernel",
+
+  # From wood/softwood/hardwood
+  "softwood", "hardwood", "oak", "hickory", "eucalyptus", "poplar", "willow", "beech", "cedar", "pine", "spruce", 
+  "fir", "bamboo", "mixed wood", "wood", "ash", "mesquite", "cottonwood",
+
+  # From straw/agricultural/crop waste
+  "corn", "wheat", "rice", "switchgrass", "miscanthus", "stover", "grass", "straw", "bagasse", "hemp", "rapeseed", 
+  "cane", "sugarcane", "bamboo chips", "maize",
+
+  # From manure/animal-based
+  "manure", "cow", "poultry", "horse", "swine", "goat", "turkey", "dairy", "human", "sewage", "biosolids",
+
+  # From sludge/industrial waste
+  "sludge", "wastewater", "municipal sludge", "waste", "paper", "compost",
+
+  # Miscellaneous
+  "algae", "charcoal", "cocoa", "artichoke", "buckwheat", "spirulina", "guayule", "soybean", "coffee", "tea",
+  "durian", "tomato", "waterweed", "shrimp", "bone"
+)
+
+# Secondary mapping
+secondary_mapping <- list(
+  # Nuts mapped to shells
+  shells = c("peanut", "pecan", "almond", "chestnut", "pistachio", "nutshell", "macadamia", "acorn", "walnut", "hazelnut"),
+  
+  # Manure/Animal-Based
+  manure = c("cow", "poultry", "horse", "swine", "goat", "turkey", "human", "dairy"),
+  
+  # Fruits
+  fruit = c("apricot", "plum", "orange", "pineapple", "grapeseed", "pomace", "olive", "palm_kernel", "cocoa", "coffee"),
+  
+  # Straw/Crop Waste
+  straw = c("wheat", "rice", "rapeseed", "reed", "maize straw"),
+  grass = c("switchgrass", "miscanthus", "giant reed", "fodder grass", "grass"),
+  maize = c("cob", "stover", "bagasse"),
+  
+  # Wood/Hardwood/Softwood
+  hardwood = c("hardwood","oak", "hickory", "eucalyptus", "poplar", "walnut", "willow", "beech", "ash", "cottonwood", "mesquite"),
+  softwood = c("softwood", "pine", "spruce", "fir", "cedar"),
+  wood = c("wood", "mixed wood"),
+  
+  # Sludge/Industrial Waste
+  sludge = c("sewage", "biosolids", "wastewater", "municipal sludge"),
+  industrial = c("waste", "paper", "compost"),
+  
+  # Miscellaneous
+  algae = c("algae", "spirulina", "waterweed"),
+  
+  # Default Fallback
+  default = c("other")
+)
+
+
+
+tertiary_mapping <- list(
+  agricultural = c("corn", "grass", "switchgrass", "wheat", "rice", "bagasse", "stover", "straw", "bamboo", "miscanthus"),
+  `wood-based` = c("wood", "pine", "oak", "hardwood", "softwood", "chips", "sawdust", "pellets", "bark"),
+  `animal-based` = c("manure", "cow", "bull", "poultry", "dairy", "sewage", "swine", "horse", "litter"),
+  `food-based` = c("nutshell", "macadamia", "acorn", "walnut", "peanut", "pecan", "almond", "chestnut", "pistachio", 
+                   "fruit", "pomace", "coconut", "plum", "orange", "pineapple", "apricot"),
+  `industrial/other` = c("waste", "sludge", "biosolids", "trash", "paper", "pit", "stone", "kernel")
+)
+
+# # Matching function with Primary, Secondary, and Tertiary logic
+match_feedstock <- function(feedstock, secondary_mapping, tertiary_mapping) {
+  if (is.na(feedstock) || nchar(feedstock) == 0) {
+    return(c(Primary = "Unknown", Secondary = "Unknown", Tertiary = "Unknown"))
+  }
+  
+  # Tokenize feedstock
+  tokens <- str_split(feedstock, "\\s+")[[1]]
+  
+  # Match Primary: Prioritize specific terms first
+  primary_match <- NULL
+  for (category in names(secondary_mapping)) {
+    specific_matches <- intersect(tokens, secondary_mapping[[category]])
+    if (length(specific_matches) > 0) {
+      primary_match <- specific_matches[1]
+      break
+    }
+  }
+  primary_match <- ifelse(!is.null(primary_match), primary_match, "other")
+  
+  # Match Secondary: Ensure it aligns with the Primary category
+  if (primary_match != "other") {
+    secondary_match <- names(secondary_mapping)[sapply(secondary_mapping, function(x) primary_match %in% x)]
+    secondary_match <- ifelse(length(secondary_match) > 0, secondary_match[1], "other")
+  } else {
+    # General fallback for Secondary
+    secondary_match <- names(secondary_mapping)[sapply(secondary_mapping, function(x) any(tokens %in% x))]
+    secondary_match <- ifelse(length(secondary_match) > 0, secondary_match[1], "other")
+  }
+  
+  # Match Tertiary: Broad classification
+  tertiary_match <- names(tertiary_mapping)[sapply(tertiary_mapping, function(x) any(x %in% tokens))]
+  tertiary_match <- ifelse(length(tertiary_match) > 0, tertiary_match[1], "Other")
+  
+  return(c(Primary = primary_match, Secondary = secondary_match, Tertiary = tertiary_match))
+}
+
+# Apply the updated logic to user_data
+user_data <- user_data %>%
+  rowwise() %>%
+  mutate(
+    Match_Result = list(match_feedstock(Simplified_Feedstock, secondary_mapping, tertiary_mapping)),
+    Primary_Feedstock = Match_Result[["Primary"]],
+    Secondary_Feedstock = Match_Result[["Secondary"]],
+    Tertiary_Feedstock = Match_Result[["Tertiary"]]
+  ) %>%
+  ungroup() %>%
+  dplyr::select(-Match_Result)
+
+# Apply the updated logic to davis_data
+davis_data <- davis_data %>%
+  rowwise() %>%
+  mutate(
+    Match_Result = list(match_feedstock(Simplified_Feedstock, secondary_mapping, tertiary_mapping)),
+    Primary_Feedstock = Match_Result[["Primary"]],
+    Secondary_Feedstock = Match_Result[["Secondary"]],
+    Tertiary_Feedstock = Match_Result[["Tertiary"]]
+  ) %>%
+  ungroup() %>%
+  dplyr::select(-Match_Result)
+
+
+ user_data <- user_data %>%
+    rename(Temperature = Temp_) 
+    
+    # Match columns for ash and total C between datasets
+davis_data <- davis_data %>%
+    rename(Temperature = Temperature_C_) %>% 
+    mutate(
+      SSN = paste0("davis_", row_number()), # Create unique SSN for davis_data
+      Ash_avg = Total_Ash_Content_ / 100, # Convert percent to decimal
+      C_tot_avg = Total_C_Used_in_Plot / 100
+  )
+
+```
+
+##### Imputing only pH from davis dataset
+
+```{r}
+
+# Combine user_data and davis_data
+combined_data <- bind_rows(
+  user_data %>%
+    mutate(dataset = "user"),
+  davis_data %>%
+    mutate(dataset = "davis")
+)
+
+# Select only relevant columns for grouping and imputation
+combined_data <- combined_data %>%
+  dplyr::select(SSN, pH, Primary_Feedstock, Temperature, dataset)
+
+# KNN Imputation with Temperature
+knn_impute_with_temp <- function(data) {
+  # Identify rows with missing pH
+  missing_idx <- which(is.na(data$pH))
+  
+  # If no missing values, return original data
+  if (length(missing_idx) == 0) return(data)
+  
+  # Split data into training and testing sets
+  train <- data %>% filter(!is.na(pH) & !is.na(Temperature)) # Complete cases only
+  test <- data %>% filter(is.na(pH) & !is.na(Temperature))   # Missing pH but with valid Temperature
+  
+  # If no valid training or testing data, skip imputation
+  if (nrow(train) == 0 || nrow(test) == 0) return(data)
+  
+  # Dynamically adjust k
+  k <- min(5, nrow(train)) # Use the smaller of 5 or the number of training rows
+  
+  # Apply KNN regression
+  knn_result <- knn.reg(
+    train = train %>% dplyr::select(Temperature) %>% as.matrix(), # Temperature as predictor
+    test = test %>% dplyr::select(Temperature) %>% as.matrix(),  # Temperature as predictor
+    y = train$pH,                                         # Non-missing pH values
+    k = k
+  )
+  
+  # Impute missing values
+  data$pH[is.na(data$pH) & !is.na(data$Temperature)] <- knn_result$pred
+  return(data)
+}
+
+# Group by Primary_Feedstock and apply KNN Imputation
+imputed_data <- combined_data %>%
+  group_by(Primary_Feedstock) %>%
+  group_modify(~ knn_impute_with_temp(.x)) %>%
+  ungroup()
+
+# Replace user_data pH values with imputed values
+user_data <- user_data %>%
+  left_join(
+    imputed_data %>%
+      filter(dataset == "user") %>%
+      dplyr::select(SSN, pH) %>% # Keep SSN to avoid duplicates
+      rename(pH_imputed = pH), # Rename the imputed pH column
+    by = "SSN"
+  ) %>%
+  mutate(pH = if_else(is.na(pH), pH_imputed, pH)) %>% # Replace missing pH values
+  dplyr::select(-pH_imputed) # Drop the imputed column
+```
+
+#### PLSR - Davis Imputed
+
+#### Tune to minimize RMSEP - MIR
+
+selecting the number of components that minimizes the RMSEP
+
+Davis imputed pH- Temp, feedstock
+
+```{r}
+
+# Replace `pH` in df1 with `pH` from user_data based on SSN
+new_df <- df1 %>%
+  left_join(user_data %>% dplyr::select(SSN, pH) %>% rename(pH_user_data = pH), by = "SSN") %>%
+  mutate(pH = if_else(!is.na(pH_user_data), pH_user_data, pH)) %>%
+  dplyr::select(-pH_user_data)  # Drop the temporary column
+    
+```
+
+Total Split
+
+```{r}
+# Run analysis for all properties
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_Davis_pH")  # For RMSEP
+run_all_properties(slprptr, new_df, spec_trt, model_type = "pls", identifier, 
+                   use_source = FALSE, tuning_goal = "rmsep")
+```
+
+Source Split
+
+```{r}
+
+# Run analysis for all properties
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_Davis_pH")  # For RMSEP
+run_all_properties(slprptr, new_df, spec_trt, model_type = "pls", identifier, 
+                   use_source = TRUE, tuning_goal = "rmsep")
+```
+
+Imputing Temp, C from Davis dataset
+
+```{r}
+
+# Combine datasets for consistent processing
+combined_data <- bind_rows(
+  user_data %>% mutate(dataset = "user"),
+  davis_data %>% mutate(dataset = "davis")
+)
+
+# Select only relevant columns for grouping and imputation
+combined_data_2 <- combined_data %>%
+  select(SSN, pH, Primary_Feedstock, Temperature, C_tot_avg, dataset)
+
+# Updated KNN Imputation with multiple predictors
+knn_impute_with_multiple_predictors <- function(data) {
+  # Identify rows with missing pH
+  missing_idx <- which(is.na(data$pH))
+  
+  # If no missing values, return original data
+  if (length(missing_idx) == 0) return(data)
+  
+  # Split data into training and testing sets
+  train <- data %>% filter(!is.na(pH) & !is.na(Temperature) & !is.na(C_tot_avg)) # Complete cases only
+  test <- data %>% filter(is.na(pH) & !is.na(Temperature)  & !is.na(C_tot_avg))   # Missing pH but with valid predictors
+  
+  # If no valid training or testing data, skip imputation
+  if (nrow(train) == 0 || nrow(test) == 0) return(data)
+  
+  # Dynamically adjust k
+  k <- min(5, nrow(train)) # Use the smaller of 5 or the number of training rows
+  
+  # Prepare training and test predictors
+  train_predictors <- train %>% dplyr::select(Temperature, C_tot_avg) %>% as.matrix()
+  test_predictors <- test %>% dplyr::select(Temperature, C_tot_avg) %>% as.matrix()
+  
+  # Apply KNN regression
+  knn_result <- knn.reg(
+    train = train_predictors,
+    test = test_predictors,
+    y = train$pH, # Non-missing pH values
+    k = k
+  )
+
+  
+  # Impute missing values
+  data$pH[is.na(data$pH) & !is.na(Temperature) & !is.na(C_tot_avg)] <- knn_result$pred
+  return(data)
+}
+
+# Group by Primary_Feedstock and apply KNN Imputation
+imputed_data <- combined_data %>%
+  group_by(Primary_Feedstock) %>%
+  group_modify(~ knn_impute_with_multiple_predictors(.x)) %>%
+  ungroup()
+
+# Replace user_data pH values with imputed values
+user_data <- user_data %>%
+  left_join(
+    imputed_data %>%
+      filter(dataset == "user") %>%
+      dplyr::select(SSN, pH) %>% # Keep SSN to avoid duplicates
+      rename(pH_imputed = pH), # Rename the imputed pH column
+    by = "SSN"
+  ) %>%
+  mutate(pH = if_else(is.na(pH), pH_imputed, pH)) %>% # Replace missing pH values
+  dplyr::select(-pH_imputed) # Drop the imputed column
+```
+
+trying to fix the issue of working with multiple predictors
+
+```{r}
+
+
+# Combine datasets for consistent processing
+combined_data <- bind_rows(
+  user_data %>% mutate(dataset = "user"),
+  davis_data %>% mutate(dataset = "davis")
+)
+
+# Select only relevant columns for grouping and imputation
+combined_data <- combined_data %>%
+  dplyr::select(SSN, pH, Primary_Feedstock, Temperature, C_tot_avg, dataset)
+
+knn_impute_with_multiple_predictors <- function(data) {
+  # Identify rows with missing pH
+  missing_idx <- which(is.na(data$pH))
+  print(colnames(data)) # Check the column names in the subset
+  print(head(data))     # View the first few rows
+  
+  # If no missing values, return original data
+  if (length(missing_idx) == 0) return(data)
+  
+  # Split data into training and testing sets
+  train <- data %>% filter(!is.na(pH) & !is.na(Temperature) & !is.na(C_tot_avg)) # Complete cases only
+  test <- data %>% filter(is.na(pH) & !is.na(Temperature) & !is.na(C_tot_avg))   # Missing pH but with valid predictors
+  
+  # If no valid training or testing data, skip imputation
+  if (nrow(train) < 5 || nrow(test) == 0) return(data)
+  
+  # Dynamically adjust k
+  k <- min(5, nrow(train))
+  
+  # Prepare training and test predictors
+  train_predictors <- train %>% dplyr::select("Temperature", "C_tot_avg") %>% as.matrix()
+  test_predictors <- test %>% dplyr::select("Temperature", "C_tot_avg") %>% as.matrix()
+  
+  # Apply KNN regression
+  knn_result <- knn.reg(
+    train = train_predictors,
+    test = test_predictors,
+    y = train$pH,
+    k = k
+  )
+  
+  # Impute missing values
+  data$pH[is.na(data$pH) & !is.na(Temperature) & !is.na(C_tot_avg)] <- knn_result$pred
+  return(data)
+}
+
+# Group by Primary_Feedstock and apply KNN Imputation
+imputed_data <- combined_data %>%
+ # group_by(Primary_Feedstock) %>%
+  group_modify(~ knn_impute_with_multiple_predictors(.x)) %>%
+  #group_modify(~ knn_impute_with_multiple_predictors(.x), .keep = TRUE) %>%
+  ungroup()
+
+# Replace user_data pH values with imputed values
+user_data <- user_data %>%
+  left_join(
+    imputed_data %>%
+      filter(dataset == "user") %>%
+      dplyr::select(SSN, pH) %>% # Keep SSN to avoid duplicates
+      rename(pH_imputed = pH), # Rename the imputed pH column
+    by = "SSN"
+  ) %>%
+  mutate(pH = if_else(is.na(pH), pH_imputed, pH)) %>% # Replace missing pH values
+  dplyr::select(-pH_imputed) # Drop the imputed column
+```
+
+trial
+
+```{r}
+
+
+# Combine user_data and davis_data
+combined_data <- bind_rows(
+  user_data %>%
+    mutate(dataset = "user"),
+  davis_data %>%
+    mutate(dataset = "davis")
+)
+
+# Select only relevant columns for grouping and imputation
+combined_data <- combined_data %>%
+  dplyr::select(SSN, pH, Primary_Feedstock, C_tot_avg, dataset)
+
+# KNN Imputation with Temperature
+knn_impute_with_temp <- function(data) {
+  # Identify rows with missing pH
+  missing_idx <- which(is.na(data$pH))
+  
+  # If no missing values, return original data
+  if (length(missing_idx) == 0) return(data)
+  
+  # Split data into training and testing sets
+  train <- data %>% filter(!is.na(pH) & !is.na(C_tot_avg)) # Complete cases only
+  test <- data %>% filter(is.na(pH) & !is.na(C_tot_avg))   # Missing pH but with valid Temperature
+  
+  # If no valid training or testing data, skip imputation
+  if (nrow(train) == 0 || nrow(test) == 0) return(data)
+  
+  # Dynamically adjust k
+  k <- min(5, nrow(train)) # Use the smaller of 5 or the number of training rows
+  
+  # Apply KNN regression
+  knn_result <- knn.reg(
+    train = train %>% dplyr::select(C_tot_avg) %>% as.matrix(), # Temperature as predictor
+    test = test %>% dplyr::select(C_tot_avg) %>% as.matrix(),  # Temperature as predictor
+    y = train$pH,                                         # Non-missing pH values
+    k = k
+  )
+  
+  # Impute missing values
+  data$pH[is.na(data$pH) & !is.na(data$C_tot_avg)] <- knn_result$pred
+  return(data)
+}
+
+# Group by Primary_Feedstock and apply KNN Imputation
+imputed_data <- combined_data %>%
+  group_by(Primary_Feedstock) %>%
+  group_modify(~ knn_impute_with_temp(.x)) %>%
+  ungroup()
+
+# Replace user_data pH values with imputed values
+user_data <- user_data %>%
+  left_join(
+    imputed_data %>%
+      filter(dataset == "user") %>%
+      dplyr::select(SSN, pH) %>% # Keep SSN to avoid duplicates
+      rename(pH_imputed = pH), # Rename the imputed pH column
+    by = "SSN"
+  ) %>%
+  mutate(pH = if_else(is.na(pH), pH_imputed, pH)) %>% # Replace missing pH values
+  dplyr::select(-pH_imputed) # Drop the imputed column
+```
+
+Davis imputed pH - Temp, feedstock, C, Ash
+
+```{r}
+
+# Replace `pH` in df1 with `pH` from user_data based on SSN
+new_df <- df1 %>%
+  left_join(user_data %>% dplyr::select(SSN, pH) %>% rename(pH_user_data = pH), by = "SSN") %>%
+  mutate(pH = if_else(!is.na(pH_user_data), pH_user_data, pH)) %>%
+  dplyr::select(-pH_user_data)  # Drop the temporary column
+    
+```
+
+Total Split
+
+```{r}
+# Run analysis for all properties
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_Davis_pH_2")  # For RMSEP
+run_all_properties(slprptr, new_df, spec_trt, model_type = "pls", identifier, 
+                   use_source = FALSE, tuning_goal = "rmsep")
+```
+
+Source Split
+
+```{r}
+
+# Run analysis for all properties
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_Davis_pH_2")  # For RMSEP
+run_all_properties(slprptr, new_df, spec_trt, model_type = "pls", identifier, 
+                   use_source = TRUE, tuning_goal = "rmsep", property_range = 2:30)
 ```

@@ -1,0 +1,983 @@
+---
+title: "Gradient-Boosted Decision Tree"
+output: html_document
+date: "2024-12-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Libraries
+
+```{r, include=FALSE}
+
+# Define a list of required packages
+required_packages <- c("writexl","randomForest", "caret", "pls", "data.table", "ithir", 
+                       "dplyr", "tidyr", "prospectr", "globals", "stringr", 
+                       "ggplot2", "here", "tidymodels", "parsnip", "plsmod", 
+                       "mixOmics", "yardstick", "purrr", "tibble","ranger","VIM","shiny","FNN","lightgbm", "xgboost", "dials", "tune")
+
+#VIM for KNN imputation
+# Load all required packages quietly without outputting any list of packages
+suppressPackageStartupMessages(
+  invisible(lapply(required_packages, library, character.only = TRUE))
+)
+```
+
+## Load reference data
+
+```{r}
+
+# treated spectra
+spec_trt <- readRDS("spec_trt_MIR.RDS")
+
+spec_trt_NIR <- readRDS("/Users/soliverchefusi/Library/CloudStorage/OneDrive-Personal/R/ICRAF&Lehmann/ICRAF_IR/ICRAF_IR_R_Project/ICRAF_IR/CEBUM/CEBUM_NIR/CEBUM_NIR/spec_trt_NIR.RDS")
+spec_trt <- spec_trt[,-2] #removing the data for the first wavenumber since it's all NAN's
+
+spec_trt_MIR_NIR <- merge(spec_trt,spec_trt_NIR, by ="SSN")
+rownames(spec_trt_MIR_NIR) <- spec_trt_MIR_NIR$SSN
+
+# biochar property data
+df1<-readRDS("df1.RDS")
+
+# df.f: full dataset;
+# spec_trt: treated spectra
+
+#Available properties to predict
+slprptr<-names(df1[-c(2:9)]) #FUSI EDIT: removing metadata columns 
+
+# defining identity object with names of biochar samples
+pred<-as.data.frame(spec_trt[,1])
+colnames(pred)<-"SSN"
+ 
+```
+
+## PLSR ( & RF) Base model
+
+1.  definine a 'base' model based on minimizing RMSEP
+
+High-Level Structure:
+
+```         
+1.  Preprocessing
+
+2.  Setting up models (PLS and Random Forest)
+
+3.  Running models (map() over models to fit them)
+
+4.  Calculating metrics (for each model)
+
+5.  Plotting results (for each model)
+
+6.  Comparing the models (optional step for comparing PLS vs Random Forest)
+```
+
+```{r}
+
+# Initialize the workspace by creating directories for storing outputs and 
+# setting up an empty tibble to accumulate performance metrics 
+initialize_workspace <- function(identifier) {
+  #dir.create(paste0("Plots_Validation_MIR_", identifier), showWarnings = FALSE)
+  dir.create(paste0("Plots_WellFitted_Properties_", identifier), showWarnings = FALSE)
+  all_metrics <<- tibble()  # Global tibble to store metrics for each property
+  
+  return(identifier)  # Pass the identifier for later use
+}
+
+# slprptr: list of properties; .x: index of property in slprptr
+select_property_data <- function(slprptr, .x, df1, spec_trt) {
+  # Filter df1 to create df.f based on SSN present in spec_trt
+    df.f <- df1 %>%
+    filter(SSN %in% spec_trt$SSN) # Select only samples present in both predictor and response datasets
+  # Check if the property exists in df1
+  if (!slprptr[.x] %in% colnames(df.f)) {
+    stop(paste("Property", slprptr[.x], "not found in df1"))
+  }
+  
+  # Columns to select, ensuring required columns are present
+  cols_to_select <- c("SSN", "Source", slprptr[.x])
+  cols_to_select <- intersect(cols_to_select, colnames(df.f))
+  
+  if (!all(cols_to_select %in% colnames(df.f))) {
+    stop(paste("Columns", paste(cols_to_select, collapse = ", "), "not found in df.f"))
+  }
+  
+  # Filter and preprocess data, including removing outliers for the selected property
+
+    
+    df.sel <- df.f %>%
+    dplyr::select(dplyr::all_of(cols_to_select)) %>%
+    inner_join(spec_trt, by = "SSN") %>%   # Combine predictor and response variables into one df
+    na.omit() %>%
+    #filter(data.table::between(.[[3]], quantile(.[[3]], 0.01), quantile(.[[3]], 0.99)))
+    filter(data.table::between(!!sym(slprptr[.x]), quantile(!!sym(slprptr[.x]), 0.01), quantile(!!sym(slprptr[.x]), 0.99))) # Filter out extremes
+  
+  # Set SSN as rownames but keep the column
+  rownames(df.sel) <- df.sel$SSN
+  # Check if df.sel has rows
+  if (nrow(df.sel) == 0) {
+    stop(paste("No matching rows in df.sel for property:", slprptr[.x]))
+  }
+  
+  return(list(df.f = df.f, df.sel = df.sel))
+}
+
+# Split data into calibration (training) and validation (test) sets
+# Allows splitting based on a specific Source if source_name is specified
+split_data <- function(df.sel, use_source = FALSE, source_name = NULL) {
+  # If a specific source_name is provided, filter data for that source
+  
+  if (!is.null(source_name)) {
+    df.sel <- df.sel %>% filter(Source == source_name)
+  }
+
+  if (use_source) {
+    set.seed(123) 
+    # Split ensuring Source is represented in both subsets
+    trainIndex <- createDataPartition(df.sel$Source, p = 0.7, list = FALSE)
+  } else {
+    set.seed(123) 
+    # Split without considering Source
+    trainIndex <- sample(seq_len(nrow(df.sel)), size = 0.7 * nrow(df.sel))
+  }
+
+  # Remove Source column
+    df.sel <- df.sel %>% dplyr::select(-Source)
+  
+  cal_ids <- rownames(df.sel)[trainIndex]
+  val_ids <- rownames(df.sel)[-trainIndex]
+    
+    # Filter and assign rownames directly
+  cal_df <- df.sel %>%
+    filter(rownames(.) %in% cal_ids) %>%
+    arrange(rownames(.)) 
+  
+  val_df <- df.sel %>%
+    filter(rownames(.) %in% val_ids) %>%
+    arrange(rownames(.))
+
+  # Save objects in the global environment
+assign("cal_df_global", cal_df, envir = .GlobalEnv)
+assign("val_df_global", val_df, envir = .GlobalEnv)
+
+  return(list(cal_df = cal_df, val_df = val_df))
+}
+
+prepare_model_data <- function(cal_df, val_df, slprptr, .x) {
+  if (nrow(cal_df) <= 10 || nrow(val_df) <= 10) {
+    warning("Insufficient rows in cal_df or val_df. Returning NA placeholders.")
+    train_data <- cal_df
+    test_data <- val_df
+    train_data[, ] <- NA
+    test_data[, ] <- NA
+  } else {
+    train_data <- cal_df
+    test_data <- val_df
+    rownames(train_data) <- train_data$SSN  # Set SSN as rownames but keep the column
+    rownames(test_data) <- test_data$SSN
+  }
+  
+  # Save rownames of training and test data for debugging
+  debug_rows <- tibble(
+    Property = slprptr[.x],
+    Dataset = c(rep("Training", nrow(train_data)), rep("Testing", nrow(test_data))),
+    SSN = c(rownames(train_data), rownames(test_data))
+  )
+  
+  # Save debugging dataframe globally to inspect later
+  if (!exists("debug_row_summary")) {
+    assign("debug_row_summary", debug_rows, envir = .GlobalEnv)
+  } else {
+    debug_row_summary <<- bind_rows(debug_row_summary, debug_rows)
+  }
+  
+  return(list(train_data = train_data, test_data = test_data))
+}
+
+# Create a recipe for data preprocessing, with optional custom steps
+preprocess_data <- function(train_data, test_data, slprptr, p, recipe_steps = NULL) {
+  # Check if train/test data is all NA
+  if (all(is.na(train_data)) || all(is.na(test_data))) {
+    warning("Preprocessing skipped due to all NA in train/test data.")
+    return(list(
+      recipe = NULL,
+      train_data = data.frame(),  # Return an empty data frame as a placeholder
+      test_data = data.frame()
+    ))
+  }
+  
+  formula <- as.formula(paste(slprptr[p], "~ ."))  # Define formula for model
+  
+  # Define base recipe with ID role (column) for SSN
+  recipe_base <- recipe(formula, data = train_data) %>%
+    update_role(SSN, new_role = "ID")  # Designate SSN column as an identifier
+  
+  # Apply additional preprocessing steps as needed
+  if (!is.null(recipe_steps)) {
+    for (step in recipe_steps) {
+      recipe_base <- recipe_base %>% step
+    }
+  }
+  
+  return(list(recipe = recipe_base, train_data = train_data, test_data = test_data))
+}
+
+# Set up PLS or Random Forest model specification, including tuning parameters
+setup_model <- function(model_type, train_data = NULL, response_var = NULL) {
+  if (model_type == "pls") {
+    # PLS setup (unchanged)
+    model_spec <- parsnip::pls() %>%
+      set_mode("regression") %>%
+      set_engine("mixOmics") %>%
+      set_args(num_comp = tune())
+    mtry_range <- NULL
+  } else if (model_type == "rf") {
+    # Random Forest setup (unchanged)
+    predictors_only <- train_data %>%
+      dplyr::select(-SSN, -all_of(response_var))
+    mtry_range <- dials::finalize(dials::mtry(), predictors_only)
+    model_spec <- parsnip::rand_forest(mtry = tune(), min_n = tune()) %>%
+      set_mode("regression") %>%
+      set_engine("ranger")
+  } else if (model_type == "gbdt") {
+    # Gradient-Boosted Decision Tree setup
+    model_spec <- parsnip::boost_tree(
+      trees = tune(),  # Number of trees to tune
+      tree_depth = tune(),  # Depth of each tree
+      learn_rate = tune(),  # Learning rate
+      loss_reduction = tune()  # Minimum gain for split
+    ) %>%
+      set_mode("regression") %>%
+      set_engine("xgboost")
+                 #early_stopping_rounds = 10)  #
+    mtry_range <- NULL  # Not applicable for GBDT
+  }
+  return(list(model_spec = model_spec, mtry_range = mtry_range))
+}
+#***** 
+
+# Function to fit both models (PLS and Random Forest) for comparison
+fit_both_models <- function(train_data, test_data, recipe) {
+  model_list <- list(
+    pls = setup_model("pls"),
+    rf = setup_model("rf", train_data = train_data),
+    gbdt = setup_model("gbdt") 
+  )
+  model_types <- names(model_list)
+  
+  # Fit each model type and return results
+  results <- purrr::map2(model_list, model_types, ~ fit_model(.x, train_data, test_data, recipe, .y))
+  return(results)
+}
+
+
+calculate_metrics <- function(data, predictions, data_type, slprptr, .x, best_params, model_type, test_data) {
+  response_var <- slprptr[.x]  # Define response variable
+
+    # Skip calculation if predictions are constant
+  if (all(predictions$.pred == predictions$.pred[1])) {
+    warning(paste("Skipping metrics calculation for constant predictions for property:", response_var))
+    return(tibble(Property = response_var, Data_Type = data_type, Model = model_type, R2 = NA, RMSE = NA))
+  }
+  # Check if response variable is present and .pred column exists in predictions
+  if (!response_var %in% colnames(data) || !".pred" %in% colnames(predictions)) {
+    message(paste("Skipping metrics calculation due to missing columns."))
+    return(tibble(Property = response_var, Data_Type = data_type, Model = model_type, R2 = NA, RMSE = NA))
+  }
+
+  # Safe computation function with error handling for each metric
+  safe_compute <- function(expression) {
+    tryCatch(eval(expression), error = function(e) NA)
+  }
+
+  # Calculate performance metrics
+  r2_value <- safe_compute(rsq_vec(truth = data[[response_var]], estimate = predictions$.pred))
+  rmse_value <- safe_compute(rmse_vec(truth = data[[response_var]], estimate = predictions$.pred))
+  bias_value <- safe_compute(mean(predictions$.pred - data[[response_var]], na.rm = TRUE) / mean(data[[response_var]], na.rm = TRUE))
+
+  # Calculate the range of the response variable from the test_data and RMSEP/range
+  response_range <- safe_compute(max(test_data[[response_var]], na.rm = TRUE) - min(test_data[[response_var]], na.rm = TRUE))
+  rmse_range_ratio <- if (!is.na(response_range) && response_range > 0) rmse_value / (response_range / 10) else NA
+
+  metrics_tibble <- tibble(
+    Property = response_var,
+    Data_Type = data_type,
+    Model = model_type,
+    Comps = if (model_type == "pls") best_params$num_comp else NA,
+    mtry = if (model_type == "rf") best_params$mtry else NA,
+    min_n = if (model_type == "rf") best_params$min_n else NA,
+    N = nrow(data),
+    R2 = r2_value,
+    RMSE = rmse_value,
+    RMSEP_range_ratio = rmse_range_ratio,
+    bias = bias_value
+  )
+
+  return(metrics_tibble)
+}
+
+# Define properties for core and related metrics
+get_property_groups <- function() {
+  core_properties <- c(
+    "Temp.", "pH", "EC_uS", "Ash_avg", "exchg_Ca_mmol_kg", 
+    "exchg_K_mmol_kg", "exchg_Mg_mmol_kg", "exchg_Na_mmol_kg", "exchg_P_mmol_kg", 
+    "Ca_mg_kg", "K_mg_kg", "Mg_mg_kg", "C_tot_avg", "N_tot_avg",
+    "C_org_wt", "H_tot_wt", "O_ult", "P_avg_mg_kg", "Fe_avg_mg_kg", "Zn_avg_mg_kg", 
+    "Cu_avg_mg_kg", "Ni_avg_mg_kg", "As_avg_mg_kg", "Cd_avg_mg_kg"
+  )
+  
+  related_properties <- c(
+    "Naphthalin_mg_kg", "X2_Methylnaphthalin", "X1_Methylnaphthalin", "Sum_Naphthaline", 
+    "Acenaphthylen", "Acenaphthen", "Fluoren", "Phenanthren", "Anthracen", 
+    "Fluoranthen", "Pyren", "Chrysen", "Benzo_a_anthracen", 
+    "Benzo_b_plus_k_fluoranthen", "Benzo_a_pyren", "Dibenzo_a_h_anthracen", 
+    "Indeno_c_d_pyren", "Benzo_g_h_i_perylen", "Sum_PAH_defined_EPA_mg_kg", 
+    "Bulk.Density_mg_m3", "C_tot_to_N_wt", "O_less_Al_Si_Fe_to_C", "O_less_Al_Si_Fe_Ca_to_C","O_less_Al_Si_Fe_C_inorg_to_C", "O_less_C_inorg_to_C", "C_org_to_N_wt", 
+    "C_tot_to_N_molar", "Htot_to_C_tot_molar", "Oult_to_C_tot_molar", 
+    "Htot_to_C_org_molar", "Oult_to_C_org_molar", "O_less_Al_Si_Fe_to_C_org_molar", 
+    "O_less_Al_Si_Fe_Ca_to_C_org_molar", "O_less_Al_Si_Fe_C_inorg__to_C_org_molar", 
+    "O_less_C_inorg_to_C_org_molar"
+  )
+  
+  return(list(core_properties = core_properties, related_properties = related_properties))
+}
+
+filter_metrics_by_group <- function(all_metrics, property_groups) {
+  core_metrics <- all_metrics %>% filter(Property %in% property_groups$core_properties)
+  related_metrics <- all_metrics %>% filter(Property %in% property_groups$related_properties)
+  return(list(core_metrics = core_metrics, related_metrics = related_metrics))
+}
+
+
+# Function to plot measured vs. predicted values and save in the default directory
+plot_predictions <- function(val_plot_data, val_df, slprptr, .x, combined_metrics, model_type, identifier) {
+  # Check if the property exists in the validation plot data
+  if (!(slprptr[.x] %in% colnames(val_plot_data))) return(NULL)
+
+  # Extract metrics for validation
+  val_metrics <- combined_metrics %>% filter(Data_Type == "Validation", Model == model_type)
+  
+  # Add label text with components and R²
+  label_text <- paste("Comps:", val_metrics$Comps, "R²:", round(val_metrics$R2, 3))
+
+  # Generate the plot
+  # validation_plot <- ggplot(val_plot_data, aes_string(x = slprptr[.x], y = ".pred")) +
+  #   geom_point(color = "blue", size = 2) +
+  #   geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  #   labs(
+  #     title = paste("Measured vs Predicted for", slprptr[.x], "-", model_type),
+  #     x = paste("Measured", slprptr[.x]),
+  #     y = "Predicted"
+  #   ) +
+  #   theme_minimal() +
+  #   annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.5, label = label_text, size = 4)
+
+  # Save the plot
+  # ggsave(
+  #   filename = paste0("Plots_Validation_PLSR_MIR_", identifier, "/", slprptr[.x], "_", model_type, ".png"),
+  #   plot = validation_plot, width = 7, height = 7, dpi = 300
+  #)
+}
+
+# Plot R² values and differences for well-fitted properties based on model criteria
+plot_well_fitted_r2 <- function(all_metrics, identifier) {
+  all_r2_values <- all_metrics %>%
+    group_by(Property) %>%
+    reframe(
+      R2_cal = R2[Data_Type == "Calibration"],
+      R2_val = R2[Data_Type == "Validation"],
+      R2_diff = abs((R2_cal - R2_val) / R2_cal)
+    )
+  
+  well_fitted_properties <- all_r2_values %>%
+    filter(R2_diff <= 0.15, R2_cal > 0.6, R2_val > 0.6) %>%
+    pull(Property)
+  
+  plot_data <- all_metrics %>%
+    filter(Property %in% well_fitted_properties, Data_Type %in% c("Calibration", "Validation")) %>%
+    dplyr::select(Property, Data_Type, R2, N, RMSE, bias,RMSEP_range_ratio) %>%
+    rename(Value = R2)
+  
+  well_fitted_plot <- ggplot(plot_data, aes(x = Property, y = Value, fill = Data_Type)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_manual(values = c("Calibration" = "purple", "Validation" = "darkgreen")) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 8),
+      panel.grid = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA)
+    ) +
+    labs(title = "R² Comparison for Well-Fitted Properties",
+         subtitle = "Purple: Calibration | Green: Validation",
+         y = "R² Value",
+         x = "Property") +
+    geom_text(
+      aes(label = ifelse(Data_Type == "Calibration", paste0("N:", N),
+                         paste0("N:", N, "\nRMSE%:\n", round(RMSEP_range_ratio, 2), "\nRel_Bias:\n", round(bias, 2)))),
+      position = position_dodge(width = 0.9), 
+      vjust = -0.5, size = 3
+    ) +
+    ylim(0, 1.35)  # Set y-axis limit to allow space for annotations
+  
+  print(well_fitted_plot)
+  
+  ggsave(filename = paste0("Plots_WellFitted_Properties_", identifier, "/well_fitted_properties_plot.png"), 
+         plot = well_fitted_plot, width = 10, height = 7, dpi = 300)
+}
+
+
+# Wrapper function to run analysis for each property in slprptr with specified model_type (no default)
+run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier, 
+                                use_source = FALSE, source_name = NULL, tuning_goal = "rmsep",
+                                property_range = 2:length(slprptr)) {
+  all_metrics <<- tibble()  # Initialize global metrics storage
+  
+  # Validate the property_range parameter
+  if (any(property_range > length(slprptr) | property_range < 1)) {
+    stop("property_range contains indices outside the valid range of slprptr.")
+  }
+  
+  # Loop through each property in the specified range and collect metrics
+  all_metrics <- purrr::map_dfr(property_range, function(.x) {
+    message("Processing property index: ", .x, " - Property: ", slprptr[.x])
+    # Select and filter the property data
+    property_data <- select_property_data(slprptr, .x, df1, spec_trt)
+    df.f <- property_data$df.f
+    df.sel <- property_data$df.sel
+    
+    # Split the data into calibration (training) and validation (test) sets
+    split <- split_data(df.sel, use_source = use_source, source_name = source_name)
+    cal_df <- split$cal_df
+    val_df <- split$val_df
+    
+    # Skip if the calibration or validation datasets have insufficient rows
+    if (nrow(cal_df) <= 10 || nrow(val_df) <= 10) {
+      message(paste("Skipping property:", slprptr[.x], "due to insufficient data"))
+      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = NA, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
+    }
+    
+    # Prepare train/test data and preprocess (e.g., removing outliers)
+    data_prep <- prepare_model_data(cal_df, val_df, slprptr, .x)  # Converts calibration and validation datasets to train/test format
+    recipe_data <- preprocess_data(data_prep$train_data, data_prep$test_data, slprptr, .x)  # Handles preprocessing steps
+    
+    # Ensure train/test data is not empty after preprocessing
+    if (nrow(recipe_data$train_data) == 0 || nrow(recipe_data$test_data) == 0) {
+      message(paste("Skipping property:", slprptr[.x], "due to empty train/test data after preprocessing."))
+      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = NA, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
+    }
+    
+    # Step 3: Skip properties with insufficient train/test data
+    if (nrow(data_prep$train_data) <= 10 || nrow(data_prep$test_data) <= 10) {
+      message(paste("Skipping property:", slprptr[.x], "due to insufficient train/test data"))
+      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = NA, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
+    }
+    
+    # Set up the model specification (PLS, RF, or GBDT) based on model_type
+    if (model_type == "pls") {
+      model_spec_list <- setup_model(model_type, train_data = data_prep$train_data)  # Set up PLS model
+    } else if (model_type == "rf") {
+      model_spec_list <- setup_model(model_type, train_data = data_prep$train_data, response_var = slprptr[.x])  # Set up RF model
+    } else if (model_type == "gbdt") {
+      model_spec_list <- setup_model(model_type, train_data = data_prep$train_data)  # Set up GBDT model
+    } else {
+      stop(paste("Unsupported model type:", model_type))  # Error for unsupported models
+    }
+    
+    # Fit the model using the specified tuning goal (e.g., RMSEP) and handle errors gracefully
+    model_fit <- tryCatch(
+      {
+        fit_model(
+          model_spec_list, 
+          train_data = recipe_data$train_data, 
+          test_data = recipe_data$test_data, 
+          recipe = recipe_data$recipe, 
+          model_type = model_type, 
+          tuning_goal = tuning_goal
+        )
+      },
+      error = function(e) {
+        # Log detailed debugging info
+        warning(paste(
+          "Error with property:", slprptr[.x], "\n",
+          "Training data dimensions:", dim(recipe_data$train_data), "\n",
+          "Test data dimensions:", dim(recipe_data$test_data), "\n",
+          "Error message:", e$message
+        ))
+        return(tibble(Property = slprptr[.x], Data_Type = "Error", Model = NA, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
+      }
+    )
+    
+    # Handle skipped properties due to model fitting issues
+    if ("Data_Type" %in% colnames(model_fit) && model_fit$Data_Type[1] == "Skipped") {
+      return(model_fit)
+    }
+    
+    # Generate predictions for calibration and validation datasets
+    cal_predictions <- predict(model_fit$model, new_data = recipe_data$train_data)
+    val_predictions <- predict(model_fit$model, new_data = recipe_data$test_data)
+    
+    # Calculate performance metrics (R², RMSE, Bias, etc.) for both datasets
+    cal_metrics <- calculate_metrics(
+      data = recipe_data$train_data, 
+      predictions = cal_predictions, 
+      data_type = "Calibration", 
+      slprptr = slprptr, 
+      .x = .x, 
+      best_params = model_fit$best_params, 
+      model_type = model_type, 
+      test_data = recipe_data$test_data
+    )
+    val_metrics <- calculate_metrics(
+      data = recipe_data$test_data, 
+      predictions = val_predictions, 
+      data_type = "Validation", 
+      slprptr = slprptr, 
+      .x = .x, 
+      best_params = model_fit$best_params, 
+      model_type = model_type, 
+      test_data = recipe_data$test_data
+    )
+    
+    # Combine metrics for calibration and validation
+    combined_metrics <- bind_rows(cal_metrics, val_metrics)
+    
+    # Plot predictions (commented out for now; enable as needed)
+    # plot_predictions(
+    #   val_plot_data = recipe_data$test_data %>% dplyr::select(slprptr[.x]) %>% bind_cols(val_predictions),
+    #   val_df = val_df,
+    #   slprptr = slprptr,
+    #   p = .x,
+    #   combined_metrics = combined_metrics,
+    #   model_type = model_type,
+    #   identifier = identifier
+    # )
+    
+    return(combined_metrics)
+  })
+  
+  # Retrieve property groups for filtering metrics
+  property_groups <- get_property_groups()
+  
+  # Filter metrics into core and related property groups
+  filtered_metrics <- filter_metrics_by_group(all_metrics, property_groups)
+  
+  # Save filtered metrics as separate tabs in an Excel file
+  output_data <- list(
+    "All Metrics" = all_metrics,
+    "Core Properties" = filtered_metrics$core_metrics,
+    "Related Properties" = filtered_metrics$related_metrics
+  )
+  output_file <- paste0("Plots_WellFitted_Properties_", identifier, "/all_metrics_", identifier, ".xlsx")
+  writexl::write_xlsx(output_data, path = output_file)
+  
+  # Plot well-fitted R² results
+  plot_well_fitted_r2(all_metrics, identifier)
+}
+```
+
+### Base model 1
+
+```{r}
+
+# Function to calculate cumulative explained variance
+calculate_explained_variance <- function(train_data, response_var, max_comps) {
+  # Prepare X and Y matrices
+  X <- train_data %>%
+    dplyr::select(-c(SSN, all_of(response_var))) %>%
+    dplyr::mutate(across(everything(), as.numeric)) %>%
+    as.matrix()
+  
+  Y <- train_data %>%
+    dplyr::select(all_of(response_var)) %>%
+    dplyr::mutate(across(everything(), as.numeric)) %>%
+    as.matrix()
+  
+  # Explained variance calculation
+  variance_list <- purrr::map_dbl(1:max_comps, function(num_comp) {
+    model <- tryCatch(
+      mixOmics::pls(X = X, Y = Y, ncomp = num_comp),
+      error = function(e) {
+        message("Error in fitting PLS model: ", e)
+        return(NULL)
+      }
+    )
+    
+    if (is.null(model)) {
+      return(0)
+    }
+    
+    # Calculate cumulative explained variance for X up to num_comp
+    cumulative_variance_X <- sum(model$prop_expl_var$X[1:num_comp])
+    cumulative_variance_X
+  })
+  
+  return(variance_list)
+}
+# 
+# # Main fit_model function
+# fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type,
+#                       tuning_goal = "rmsep", cumulative_variance_threshold = 0.85) {
+# 
+#   model_spec <- model_spec_list$model_spec
+#   mtry_range <- model_spec_list$mtry_range
+# 
+#   # Create a workflow with the recipe and the model
+#   biochar_workflow <- workflow() %>%
+#     add_recipe(recipe) %>%
+#     add_model(model_spec)
+# 
+#   set.seed(123)
+#   cv_folds <- vfold_cv(train_data, v = 10)  # 10-fold cross-validation
+# 
+#   if (model_type == "gbdt") {
+#     # Define a GBDT-specific tuning grid
+#     gbdt_grid <- grid_random(
+#       trees(range = c(50, 500)),  # Tune number of trees
+#       tree_depth(range = c(3, 10)),  # Tune tree depth
+#       learn_rate(range = c(0.1, 0.3)),  # Tune learning rate
+#       loss_reduction(range = c(0, 5)),  # Minimum gain for a split
+#       #levels = 5
+#       size = 10
+#     )
+#     
+#     # # Add early stopping to the control
+#     # control <- control_grid(
+#     #   save_pred = TRUE,
+#     #   verbose = TRUE,
+#     #   stop_iter = 10  # Stop if no improvement after 10 iterations
+#     # )
+#     
+#     # Tune the GBDT model using the grid
+#     tune_results <- tune_grid(
+#       biochar_workflow,
+#       resamples = cv_folds,
+#       grid = gbdt_grid,
+#       metrics = metric_set(rmse),
+#       #control = control
+#       control = control_grid(save_pred = TRUE)
+#     )
+#     
+#     # Select the best parameters based on RMSE
+#     best_params <- tune_results %>% select_best(metric = "rmse")
+#     
+#     # Finalize the workflow with the best parameters
+#     final_workflow <- finalize_workflow(biochar_workflow, best_params)
+#     
+#   } else if (model_type == "pls") {
+#     max_comps <- min(25, nrow(test_data) - 1)  # Limit max components for PLS
+# 
+#     if (tuning_goal == "rmsep") {
+#       # Tune PLS to minimize RMSEP
+#       num_comp_grid <- tibble(num_comp = 1:max_comps)
+#       tune_results <- tune_grid(
+#         biochar_workflow,
+#         resamples = cv_folds,
+#         grid = num_comp_grid,
+#         metrics = metric_set(rmse),
+#         control = control_grid(save_pred = TRUE)
+#       )
+# 
+#       best_params <- tune_results %>% select_best(metric = "rmse") %>% dplyr::select(num_comp)
+#       final_workflow <- finalize_workflow(biochar_workflow, best_params)
+# 
+#     } else if (tuning_goal == "variance") {
+#       # Tune PLS based on cumulative explained variance
+#       response_var <- colnames(train_data)[[2]]  # Adjust index if response var is at a different position
+#       explained_variance <- calculate_explained_variance(train_data, response_var, max_comps)
+# 
+#       # Find the minimum number of components meeting the variance threshold
+#       num_comp <- which(explained_variance >= cumulative_variance_threshold)[1]
+#       if (is.na(num_comp) || is.null(num_comp)) {
+#         message(paste("Skipping property:", response_var, "due to insufficient cumulative variance."))
+#         return(tibble(
+#           Property = response_var,
+#           Data_Type = "Skipped",
+#           Model = model_type,
+#           N = NA,
+#           R2 = NA,
+#           RMSE = NA,
+#           bias = NA,
+#           ncomp = NA
+#         ))
+#       }
+# 
+#       # Validate the selected number of components with cross-validation
+#       num_comp_grid <- tibble(num_comp = num_comp)
+#       tune_results <- tune_grid(
+#         biochar_workflow,
+#         resamples = cv_folds,
+#         grid = num_comp_grid,
+#         metrics = metric_set(rmse),
+#         control = control_grid(save_pred = TRUE)
+#       )
+# 
+#       best_params <- tibble(num_comp = num_comp)
+#       final_workflow <- finalize_workflow(biochar_workflow, best_params)
+#     }
+# 
+#   } else if (model_type == "rf") {
+#     # Tune Random Forest using the specified grid
+#     rf_grid <- grid_regular(mtry_range, min_n(), levels = 5)
+#     tune_results <- tune_grid(
+#       biochar_workflow,
+#       resamples = cv_folds,
+#       grid = rf_grid,
+#       metrics = metric_set(rmse),
+#       control = control_grid(save_pred = TRUE)
+#     )
+#     best_params <- tune_results %>% select_best(metric = "rmse")
+#     final_workflow <- finalize_workflow(biochar_workflow, best_params)
+#   }
+# 
+#   # Fit the finalized model
+#   model_fit <- fit(final_workflow, data = train_data)
+# 
+#   # Make predictions on train and test data
+#   train_predictions <- tryCatch({
+#     predict(model_fit, new_data = train_data) %>% as_tibble()
+#   }, error = function(e) {
+#     message("Error in train_predictions: ", e)
+#     return(NULL)
+#   })
+# 
+#   test_predictions <- tryCatch({
+#     predict(model_fit, new_data = test_data) %>% as_tibble()
+#   }, error = function(e) {
+#     message("Error in test_predictions: ", e)
+#     return(NULL)
+#   })
+# 
+#   # Ensure predictions are not null
+#   if (is.null(train_predictions) || is.null(test_predictions)) {
+#     stop("Prediction failed: check data dimensions or NA values in predictor matrix.")
+#   }
+# 
+#   return(list(
+#     model = model_fit,
+#     train_predictions = train_predictions,
+#     test_predictions = test_predictions,
+#     best_params = best_params
+#   ))
+# }
+
+
+fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type,
+                      tuning_goal = "rmsep", cumulative_variance_threshold = 0.85) {
+  tryCatch({
+    model_spec <- model_spec_list$model_spec
+    mtry_range <- model_spec_list$mtry_range
+
+    # Create a workflow with the recipe and the model
+    biochar_workflow <- workflow() %>%
+      add_recipe(recipe) %>%
+      add_model(model_spec)
+
+    set.seed(123)
+    cv_folds <- vfold_cv(train_data, v = 10)  # 10-fold cross-validation
+
+    if (model_type == "gbdt") {
+      # Define a GBDT-specific tuning grid
+      gbdt_grid <- grid_random(
+        trees(range = c(50, 500)),  # Tune number of trees
+        tree_depth(range = c(3, 10)),  # Tune tree depth
+        learn_rate(range = c(0.1, 0.3)),  # Tune learning rate
+        loss_reduction(range = c(0, 5)),  # Minimum gain for a split
+        size = 10
+      )
+      
+      # Tune the GBDT model using the grid
+      tune_results <- tryCatch({
+        tune_grid(
+          biochar_workflow,
+          resamples = cv_folds,
+          grid = gbdt_grid,
+          metrics = metric_set(rmse),
+          control = control_grid(save_pred = TRUE)
+        )
+      }, error = function(e) {
+        warning("Error during GBDT tuning: ", e$message)
+        return(NULL)
+      })
+
+      # If tuning failed, return NULL
+      if (is.null(tune_results)) return(NULL)
+
+      # Select the best parameters based on RMSE
+      best_params <- tune_results %>% select_best(metric = "rmse")
+      
+      # Finalize the workflow with the best parameters
+      final_workflow <- finalize_workflow(biochar_workflow, best_params)
+
+    } else if (model_type == "pls") {
+      max_comps <- min(25, nrow(test_data) - 1)  # Limit max components for PLS
+
+      if (tuning_goal == "rmsep") {
+        # Tune PLS to minimize RMSEP
+        num_comp_grid <- tibble(num_comp = 1:max_comps)
+        tune_results <- tryCatch({
+          tune_grid(
+            biochar_workflow,
+            resamples = cv_folds,
+            grid = num_comp_grid,
+            metrics = metric_set(rmse),
+            control = control_grid(save_pred = TRUE)
+          )
+        }, error = function(e) {
+          warning("Error during PLS tuning: ", e$message)
+          return(NULL)
+        })
+
+        # If tuning failed, return NULL
+        if (is.null(tune_results)) return(NULL)
+
+        best_params <- tune_results %>% select_best(metric = "rmse") %>% dplyr::select(num_comp)
+        final_workflow <- finalize_workflow(biochar_workflow, best_params)
+
+      } else if (tuning_goal == "variance") {
+        # Tune PLS based on cumulative explained variance
+        response_var <- colnames(train_data)[[2]]  # Adjust index if response var is at a different position
+        explained_variance <- calculate_explained_variance(train_data, response_var, max_comps)
+
+        # Find the minimum number of components meeting the variance threshold
+        num_comp <- which(explained_variance >= cumulative_variance_threshold)[1]
+        if (is.na(num_comp) || is.null(num_comp)) {
+          message(paste("Skipping property:", response_var, "due to insufficient cumulative variance."))
+          return(NULL)
+        }
+
+        # Validate the selected number of components with cross-validation
+        num_comp_grid <- tibble(num_comp = num_comp)
+        tune_results <- tryCatch({
+          tune_grid(
+            biochar_workflow,
+            resamples = cv_folds,
+            grid = num_comp_grid,
+            metrics = metric_set(rmse),
+            control = control_grid(save_pred = TRUE)
+          )
+        }, error = function(e) {
+          warning("Error during PLS variance tuning: ", e$message)
+          return(NULL)
+        })
+
+        # If tuning failed, return NULL
+        if (is.null(tune_results)) return(NULL)
+
+        best_params <- tibble(num_comp = num_comp)
+        final_workflow <- finalize_workflow(biochar_workflow, best_params)
+      }
+
+    } else if (model_type == "rf") {
+      # Tune Random Forest using the specified grid
+      rf_grid <- grid_regular(mtry_range, min_n(), levels = 5)
+      tune_results <- tryCatch({
+        tune_grid(
+          biochar_workflow,
+          resamples = cv_folds,
+          grid = rf_grid,
+          metrics = metric_set(rmse),
+          control = control_grid(save_pred = TRUE)
+        )
+      }, error = function(e) {
+        warning("Error during RF tuning: ", e$message)
+        return(NULL)
+      })
+
+      # If tuning failed, return NULL
+      if (is.null(tune_results)) return(NULL)
+
+      best_params <- tune_results %>% select_best(metric = "rmse")
+      final_workflow <- finalize_workflow(biochar_workflow, best_params)
+    }
+
+    # Fit the finalized model
+    model_fit <- fit(final_workflow, data = train_data)
+
+    # Make predictions on train and test data
+    train_predictions <- tryCatch({
+      predict(model_fit, new_data = train_data) %>% as_tibble()
+    }, error = function(e) {
+      message("Error in train_predictions: ", e$message)
+      return(NULL)
+    })
+
+    test_predictions <- tryCatch({
+      predict(model_fit, new_data = test_data) %>% as_tibble()
+    }, error = function(e) {
+      message("Error in test_predictions: ", e$message)
+      return(NULL)
+    })
+
+    # Ensure predictions are not null
+    if (is.null(train_predictions) || is.null(test_predictions)) {
+      stop("Prediction failed: check data dimensions or NA values in predictor matrix.")
+    }
+
+    return(list(
+      model = model_fit,
+      train_predictions = train_predictions,
+      test_predictions = test_predictions,
+      best_params = best_params
+    ))
+  }, error = function(e) {
+    warning("Error in the main model fitting process: ", e$message)
+    return(NULL)
+  })
+}
+```
+
+Test
+
+```{r}
+
+
+# Run analysis for all properties
+identifier <- initialize_workspace("GBDT_RMSEP_MIR_totsplit") 
+
+run_all_properties(
+  slprptr = slprptr,
+  df1 = df1,
+  spec_trt = spec_trt,
+  model_type = "gbdt",  # Specify GBDT
+  use_source = FALSE,
+  tuning_goal = "rmsep",
+  identifier,
+  property_range = 2:length(slprptr)
+)
+```
+
+```{r}
+
+# Run analysis for all properties
+identifier <- initialize_workspace("GBDT_RMSEP_MIR_sourcesplit") 
+
+run_all_properties(
+  slprptr = slprptr,
+  df1 = df1,
+  spec_trt = spec_trt,
+  model_type = "gbdt",  # Specify GBDT
+  use_source = TRUE,
+  tuning_goal = "rmsep",
+  identifier,
+  property_range = 2:length(slprptr)
+)
+```
+
+```{r}
+
+# Run analysis for all properties
+identifier <- initialize_workspace("GBDT_RMSEP_MIR_CornellOnlysplit") 
+
+run_all_properties(
+  slprptr = slprptr,
+  df1 = df1,
+  spec_trt = spec_trt,
+  model_type = "gbdt",  # Specify GBDT
+  use_source = FALSE,
+  source_name = "Cornell ",
+  tuning_goal = "rmsep",
+  identifier,
+  property_range = 2:length(slprptr)
+)
+```

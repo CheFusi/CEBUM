@@ -242,6 +242,9 @@ setup_model <- function(model_type, train_data = NULL, response_var = NULL) {
     # Remove SSN and response columns to get only predictor columns
     predictors_only <- train_data %>%
       dplyr::select(-SSN, -all_of(response_var))
+        # Check if predictors are sufficient
+    if (ncol(predictors_only) < 2) stop("Random Forest requires at least 2 predictor variables.")
+    
     
     # Finalize mtry_range
     mtry_range <- dials::finalize(dials::mtry(), predictors_only) # predictors_only is used to set the max value for the mtry range - so here mtry ranges up to the total number of predictors (e.g. number of wavenumbers).
@@ -678,7 +681,7 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
     }
   } else if (model_type == "rf") {
     # Random Forest tuning remains unchanged
-    rf_grid <- grid_regular(mtry_range, min_n(), levels = 5)
+    rf_grid <- grid_regular(mtry_range, min_n(), levels = 3)
     tune_results <- tune_grid(
       biochar_workflow,
       resamples = cv_folds,
@@ -872,9 +875,30 @@ RF
 
 ```{r}
 
-# identifier <- initialize_workspace("RF_RMSEP_totsplit_99perc")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier, 
-#                    use_source = TRUE, tuning_goal = "rmsep")
+identifier <- initialize_workspace("RF_RMSEP_totsplit_99perc")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
+                   use_source = TRUE, tuning_goal = "rmsep")
+```
+
+```{r}
+
+identifier <- initialize_workspace("RF_RMSEP_sourcesplit_99perc")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
+                   use_source = FALSE, tuning_goal = "rmsep")
+```
+
+```{r}
+
+identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_99perc")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
+                   use_source = FALSE, tuning_goal = "rmsep")
+```
+
+```{r}
+
+identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_99perc")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
+                   use_source = TRUE, tuning_goal = "rmsep")
 ```
 
 ### Base model 1B:
@@ -1296,6 +1320,10 @@ davis_data <- davis_data %>%
       C_tot_avg = Total_C_Used_in_Plot / 100
   )
 
+# Save the datasets as Excel files
+# write_xlsx(user_data, "user_data.xlsx")
+# write_xlsx(davis_data, "davis_data.xlsx")
+
 ```
 
 ##### Imputing only pH from davis dataset
@@ -1405,75 +1433,6 @@ Imputing Temp, C from Davis dataset
 
 ```{r}
 
-# Combine datasets for consistent processing
-combined_data <- bind_rows(
-  user_data %>% mutate(dataset = "user"),
-  davis_data %>% mutate(dataset = "davis")
-)
-
-# Select only relevant columns for grouping and imputation
-combined_data_2 <- combined_data %>%
-  select(SSN, pH, Primary_Feedstock, Temperature, C_tot_avg, dataset)
-
-# Updated KNN Imputation with multiple predictors
-knn_impute_with_multiple_predictors <- function(data) {
-  # Identify rows with missing pH
-  missing_idx <- which(is.na(data$pH))
-  
-  # If no missing values, return original data
-  if (length(missing_idx) == 0) return(data)
-  
-  # Split data into training and testing sets
-  train <- data %>% filter(!is.na(pH) & !is.na(Temperature) & !is.na(C_tot_avg)) # Complete cases only
-  test <- data %>% filter(is.na(pH) & !is.na(Temperature)  & !is.na(C_tot_avg))   # Missing pH but with valid predictors
-  
-  # If no valid training or testing data, skip imputation
-  if (nrow(train) == 0 || nrow(test) == 0) return(data)
-  
-  # Dynamically adjust k
-  k <- min(5, nrow(train)) # Use the smaller of 5 or the number of training rows
-  
-  # Prepare training and test predictors
-  train_predictors <- train %>% dplyr::select(Temperature, C_tot_avg) %>% as.matrix()
-  test_predictors <- test %>% dplyr::select(Temperature, C_tot_avg) %>% as.matrix()
-  
-  # Apply KNN regression
-  knn_result <- knn.reg(
-    train = train_predictors,
-    test = test_predictors,
-    y = train$pH, # Non-missing pH values
-    k = k
-  )
-
-  
-  # Impute missing values
-  data$pH[is.na(data$pH) & !is.na(Temperature) & !is.na(C_tot_avg)] <- knn_result$pred
-  return(data)
-}
-
-# Group by Primary_Feedstock and apply KNN Imputation
-imputed_data <- combined_data %>%
-  group_by(Primary_Feedstock) %>%
-  group_modify(~ knn_impute_with_multiple_predictors(.x)) %>%
-  ungroup()
-
-# Replace user_data pH values with imputed values
-user_data <- user_data %>%
-  left_join(
-    imputed_data %>%
-      filter(dataset == "user") %>%
-      dplyr::select(SSN, pH) %>% # Keep SSN to avoid duplicates
-      rename(pH_imputed = pH), # Rename the imputed pH column
-    by = "SSN"
-  ) %>%
-  mutate(pH = if_else(is.na(pH), pH_imputed, pH)) %>% # Replace missing pH values
-  dplyr::select(-pH_imputed) # Drop the imputed column
-```
-
-trying to fix the issue of working with multiple predictors
-
-```{r}
-
 
 # Combine datasets for consistent processing
 combined_data <- bind_rows(
@@ -1488,8 +1447,6 @@ combined_data <- combined_data %>%
 knn_impute_with_multiple_predictors <- function(data) {
   # Identify rows with missing pH
   missing_idx <- which(is.na(data$pH))
-  print(colnames(data)) # Check the column names in the subset
-  print(head(data))     # View the first few rows
   
   # If no missing values, return original data
   if (length(missing_idx) == 0) return(data)
@@ -1516,83 +1473,19 @@ knn_impute_with_multiple_predictors <- function(data) {
     k = k
   )
   
+   
   # Impute missing values
-  data$pH[is.na(data$pH) & !is.na(Temperature) & !is.na(C_tot_avg)] <- knn_result$pred
-  return(data)
-}
-
-# Group by Primary_Feedstock and apply KNN Imputation
-imputed_data <- combined_data %>%
- # group_by(Primary_Feedstock) %>%
-  group_modify(~ knn_impute_with_multiple_predictors(.x)) %>%
-  #group_modify(~ knn_impute_with_multiple_predictors(.x), .keep = TRUE) %>%
-  ungroup()
-
-# Replace user_data pH values with imputed values
-user_data <- user_data %>%
-  left_join(
-    imputed_data %>%
-      filter(dataset == "user") %>%
-      dplyr::select(SSN, pH) %>% # Keep SSN to avoid duplicates
-      rename(pH_imputed = pH), # Rename the imputed pH column
-    by = "SSN"
-  ) %>%
-  mutate(pH = if_else(is.na(pH), pH_imputed, pH)) %>% # Replace missing pH values
-  dplyr::select(-pH_imputed) # Drop the imputed column
-```
-
-trial
-
-```{r}
-
-
-# Combine user_data and davis_data
-combined_data <- bind_rows(
-  user_data %>%
-    mutate(dataset = "user"),
-  davis_data %>%
-    mutate(dataset = "davis")
-)
-
-# Select only relevant columns for grouping and imputation
-combined_data <- combined_data %>%
-  dplyr::select(SSN, pH, Primary_Feedstock, C_tot_avg, dataset)
-
-# KNN Imputation with Temperature
-knn_impute_with_temp <- function(data) {
-  # Identify rows with missing pH
-  missing_idx <- which(is.na(data$pH))
+  #data$pH[is.na(data$pH) & !is.na(Temperature) & !is.na(C_tot_avg)] <- knn_result$pred
+  data$pH[is.na(data$pH) & !is.na(data[["Temperature"]]) & !is.na(data[["C_tot_avg"]])] <- knn_result$pred
   
-  # If no missing values, return original data
-  if (length(missing_idx) == 0) return(data)
-  
-  # Split data into training and testing sets
-  train <- data %>% filter(!is.na(pH) & !is.na(C_tot_avg)) # Complete cases only
-  test <- data %>% filter(is.na(pH) & !is.na(C_tot_avg))   # Missing pH but with valid Temperature
-  
-  # If no valid training or testing data, skip imputation
-  if (nrow(train) == 0 || nrow(test) == 0) return(data)
-  
-  # Dynamically adjust k
-  k <- min(5, nrow(train)) # Use the smaller of 5 or the number of training rows
-  
-  # Apply KNN regression
-  knn_result <- knn.reg(
-    train = train %>% dplyr::select(C_tot_avg) %>% as.matrix(), # Temperature as predictor
-    test = test %>% dplyr::select(C_tot_avg) %>% as.matrix(),  # Temperature as predictor
-    y = train$pH,                                         # Non-missing pH values
-    k = k
-  )
-  
-  # Impute missing values
-  data$pH[is.na(data$pH) & !is.na(data$C_tot_avg)] <- knn_result$pred
+   
   return(data)
 }
 
 # Group by Primary_Feedstock and apply KNN Imputation
 imputed_data <- combined_data %>%
   group_by(Primary_Feedstock) %>%
-  group_modify(~ knn_impute_with_temp(.x)) %>%
+  group_modify(~ knn_impute_with_multiple_predictors(.x)) %>%
   ungroup()
 
 # Replace user_data pH values with imputed values
@@ -1608,7 +1501,7 @@ user_data <- user_data %>%
   dplyr::select(-pH_imputed) # Drop the imputed column
 ```
 
-Davis imputed pH - Temp, feedstock, C, Ash
+Davis imputed pH - Temp, feedstock, C,
 
 ```{r}
 
@@ -1626,7 +1519,7 @@ Total Split
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_Davis_pH_2")  # For RMSEP
 run_all_properties(slprptr, new_df, spec_trt, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep")
+                   use_source = FALSE, tuning_goal = "rmsep", property_range = 2:30)
 ```
 
 Source Split
@@ -1637,4 +1530,13 @@ Source Split
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_Davis_pH_2")  # For RMSEP
 run_all_properties(slprptr, new_df, spec_trt, model_type = "pls", identifier, 
                    use_source = TRUE, tuning_goal = "rmsep", property_range = 2:30)
+```
+
+```{r}
+
+17.86+34.92+72.38
+
+337+417+2250 +1200+500+1000+100+5200+390+180+650+100+200+2480+2350+300+2500+200+500+1000+1300+450+1700+1400+2000+560+1500+600+5600+3500+320+4000+300+250+4090+5200+400+2200+750+400+1800+780+200+450+470+5200+15000+3500+2000+1000+570+2000+235+500+500+270+320+760+600+600+280+180+280+1000+700+2400+1190+900+275+3500+
+  
+  3000+1000
 ```

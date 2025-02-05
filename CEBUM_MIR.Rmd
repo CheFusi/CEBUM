@@ -215,7 +215,9 @@ spec.m$SSN <- as.factor (spec.m$SSN)
 avg_spec <- spec.m %>% 
   group_by(SSN, variable) %>%
   summarise(value = mean(value, na.rm = TRUE))
+#this about format of average the replicates kept giving errors so used aggregate instead.
 
+avg_spec <- aggregate(value ~ SSN + variable, data = spec.m, FUN = mean, na.rm = TRUE)
 
 # Cast the melted data back to wide format
 raw0 <- dcast(avg_spec, SSN ~ variable, value.var = "value")
@@ -831,6 +833,33 @@ df.f_master <-df.f
 #filtering and removing the columns (reference variables) where more than 70% of data is missing/NA
 
 saveRDS(df.f,"df.f.RDS")
+```
+
+### Lab Covariate 
+
+3rd February
+
+Adding lab as a covariate
+
+```{r}
+
+# Filter out rows where 'Source' is missing
+df1_labs <- df1 %>%
+  filter(!is.na(Source) & Source != "") %>%  # Exclude missing Source values
+  dplyr::select(SSN, Source) %>% 
+  mutate(Source = as.factor(Source)) %>%
+  tidyr::pivot_wider(names_from = Source, values_from = Source, 
+                     values_fn = length, values_fill = 0) %>%
+  rename_with(~ paste0("Lab_", .), -SSN)  # Rename to Lab_<name>
+
+# Merge the encoded lab data with spec_trt using SSN
+spec_trt_lab <- spec_trt %>%
+  left_join(df1_labs, by = "SSN")  # Use left_join to retain all spec_trt samples
+
+# Replace missing lab values (for samples with no lab reference) with 0
+spec_trt_lab[is.na(spec_trt_lab)] <- 0
+
+saveRDS(spec_trt_lab,"spec_trt_MIR_lab.RDS")
 ```
 
 ## Summary statistics

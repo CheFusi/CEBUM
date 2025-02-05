@@ -1,14 +1,14 @@
 ---
-title: "CEBUM_PLSR_Workflow"
+title: "Working Scripts"
 output: html_document
-date: "2024-10-14"
-editor_options: 
-  chunk_output_type: inline
+date: "2025-02-04"
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
+
+# Current Workflow
 
 ## Load Libraries
 
@@ -18,7 +18,7 @@ knitr::opts_chunk$set(echo = TRUE)
 required_packages <- c("writexl","randomForest", "caret", "pls", "data.table", "ithir", 
                        "dplyr", "tidyr", "prospectr", "globals", "stringr", 
                        "ggplot2", "here", "tidymodels", "parsnip", "plsmod", 
-                       "mixOmics", "yardstick", "purrr", "tibble","ranger","VIM","shiny","FNN","lightgbm", "xgboost", "dials", "tune", "brnn")
+                       "mixOmics", "yardstick", "purrr", "tibble","ranger","VIM","shiny","FNN")
 
 #VIM for KNN imputation
 # Load all required packages quietly without outputting any list of packages
@@ -116,8 +116,9 @@ select_property_data <- function(slprptr, .x, df1, spec_trt) {
     df.sel <- df.f %>%
     dplyr::select(dplyr::all_of(cols_to_select)) %>%
     inner_join(spec_trt, by = "SSN") %>%   # Combine predictor and response variables into one df
-    na.omit()#%>%
-    #filter(data.table::between(!!sym(slprptr[.x]), quantile(!!sym(slprptr[.x]), 0.01), quantile(!!sym(slprptr[.x]), 0.99))) # Filter out extremes
+    na.omit() %>%
+    #filter(data.table::between(.[[3]], quantile(.[[3]], 0.01), quantile(.[[3]], 0.99)))
+    filter(data.table::between(!!sym(slprptr[.x]), quantile(!!sym(slprptr[.x]), 0.01), quantile(!!sym(slprptr[.x]), 0.99))) # Filter out extremes
   
   # Set SSN as rownames but keep the column
   rownames(df.sel) <- df.sel$SSN
@@ -202,7 +203,7 @@ prepare_model_data <- function(cal_df, val_df, slprptr, .x) {
 }
 
 # Create a recipe for data preprocessing, with optional custom steps
-preprocess_data <- function(train_data, test_data, slprptr, p, recipe_steps = NULL,include_zv = FALSE, include_pca = FALSE) {
+preprocess_data <- function(train_data, test_data, slprptr, p, recipe_steps = NULL,include_zv = FALSE) {
   # Check if train/test data is all NA
   if (all(is.na(train_data)) || all(is.na(test_data))) {
     warning("Preprocessing skipped due to all NA in train/test data.")
@@ -224,15 +225,6 @@ preprocess_data <- function(train_data, test_data, slprptr, p, recipe_steps = NU
     recipe_base <- recipe_base %>% step_zv()%>%
 step_nzv()
   }
-  
-  # Conditionally add PCA only if include_pca is TRUE
-  if (include_pca) {
-    num_pca_comps <- min(50, nrow(train_data)-1)
-    
-    recipe_base <- recipe_base %>%
-      step_pca(all_numeric_predictors(), num_comp = num_pca_comps)
-  }
-  
   
   # Apply additional preprocessing steps as needed
   if (!is.null(recipe_steps)) {
@@ -274,48 +266,24 @@ setup_model <- function(model_type, train_data = NULL, response_var = NULL) {
     model_spec <- parsnip::rand_forest(mtry = tune(), min_n = tune()) %>%
       set_mode("regression") %>%
       set_engine("ranger")
-  } else if (model_type == "gbdt") {
-    # Gradient-Boosted Decision Tree setup
-    predictors_only <- train_data %>%
-      dplyr::select(-SSN, -all_of(response_var))
-    model_spec <- parsnip::boost_tree(
-      trees = tune(),  # Number of trees to tune
-      tree_depth = tune(),  # Depth of each tree
-      learn_rate = tune(),  # Learning rate
-      loss_reduction = tune(),  # Minimum gain for split
-      min_n = tune(),  # Tune minimal node size
-      #sample_size = tune(),  # Tune row sampling
-      mtry = tune()  # Tune predictor sampling
-    ) %>%
-      set_mode("regression") %>%
-      set_engine("xgboost")
-                 #early_stopping_rounds = 10)  #
-    mtry_range <- NULL  # Not applicable for GBDT
-  } else if (model_type == "brnn") {
-    model_spec <- parsnip::mlp(hidden_units = tune(), penalty = tune()) %>%
-      set_mode("regression") %>%
-      set_engine("nnet")
-    mtry_range <- NULL
-  } else {
-    stop("Unsupported model type: ", model_type)
   }
+
   return(list(model_spec = model_spec, mtry_range = mtry_range))
 }
 #***** 
 
-# # Function to fit both models (PLS and Random Forest) for comparison
-# fit_both_models <- function(train_data, test_data, recipe) {
-#   model_list <- list(
-#     pls = setup_model("pls"),
-#     rf = setup_model("rf", train_data = train_data),
-#     
-#   )
-#   model_types <- names(model_list)
-#   
-#   # Fit each model type and return results
-#   results <- purrr::map2(model_list, model_types, ~ fit_model(.x, train_data, test_data, recipe, .y))
-#   return(results)
-# }
+# Function to fit both models (PLS and Random Forest) for comparison
+fit_both_models <- function(train_data, test_data, recipe) {
+  model_list <- list(
+    pls = setup_model("pls"),
+    rf = setup_model("rf", train_data = train_data)
+  )
+  model_types <- names(model_list)
+  
+  # Fit each model type and return results
+  results <- purrr::map2(model_list, model_types, ~ fit_model(.x, train_data, test_data, recipe, .y))
+  return(results)
+}
 
 
 calculate_metrics <- function(data, predictions, data_type, slprptr, .x, best_params, model_type, test_data) {
@@ -471,7 +439,7 @@ plot_well_fitted_r2 <- function(all_metrics, identifier) {
 # Wrapper function to run analysis for each property in slprptr with specified model_type (no default)
 run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier, 
                                 use_source = FALSE, source_name = NULL, tuning_goal = "rmsep",
-                                property_range = 2:length(slprptr),  include_zv = FALSE, include_pca = FALSE) {
+                                property_range = 2:length(slprptr),  include_zv = FALSE) {
   #all_metrics <<- tibble()  # Initialize global metrics storage
   model_results <- list()  # Store model fits for later use
   output_dir <- paste0("Plots_WellFitted_Properties_", identifier)  # Use existing directory
@@ -503,8 +471,7 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
     
     # Prepare train/test data and preprocess (e.g., removing outliers)
     data_prep <- prepare_model_data(cal_df, val_df, slprptr, .x)  # Converts calibration and validation datasets to train/test format
-    recipe_data <- preprocess_data(data_prep$train_data, data_prep$test_data, slprptr, .x, 
-      include_pca = include_pca, include_zv)  # Handles preprocessing steps
+    recipe_data <- preprocess_data(data_prep$train_data, data_prep$test_data, slprptr, .x)  # Handles preprocessing steps
     
     # Ensure train/test data is not empty after preprocessing
     if (nrow(recipe_data$train_data) == 0 || nrow(recipe_data$test_data) == 0) {
@@ -523,12 +490,6 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
       model_spec_list <- setup_model(model_type, train_data = data_prep$train_data)  # Set up PLS model
     } else if (model_type == "rf") {
       model_spec_list <- setup_model(model_type, train_data = data_prep$train_data, response_var = slprptr[.x])  # Set up RF model
-    } else if (model_type == "gbdt") {
-      model_spec_list <- setup_model(model_type, train_data = data_prep$train_data)  # Set up GBDT model
-    } else if (model_type == "brnn") {  # 🔥 Fix: Ensure BRNN is handled
-  model_spec_list <- setup_model(model_type, train_data = data_prep$train_data)  # Set up BRNN model
-  } else {
-      stop(paste("Unsupported model type:", model_type))  # Error for unsupported models
     }
     
     # Fit the model using the specified tuning goal (e.g., RMSEP) and handle errors gracefully
@@ -678,14 +639,8 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
   biochar_workflow <- workflow() %>%
     add_recipe(recipe) %>%
     add_model(model_spec)
- 
-   # Setting defalt CV
-    set.seed(123)
-  cv_folds <- if (nrow(train_data) <= 10) {
-    vfold_cv(train_data, v = nrow(train_data))  
-  } else {
-    vfold_cv(train_data, v = 10)  
-  }
+
+
 
   if (model_type == "pls") {
     
@@ -772,8 +727,9 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
         metrics = metric_set(rmse),
         control = control_grid(save_pred = TRUE)
       )
-    best_params <- tibble(num_comp = num_comp)
-    final_workflow <- finalize_workflow(biochar_workflow, best_params)
+
+      best_params <- tibble(num_comp = num_comp)
+      final_workflow <- finalize_workflow(biochar_workflow, best_params)
     }
   } else if (model_type == "rf") {
   set.seed(123)
@@ -806,9 +762,8 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
     }
     
     rf_model <- rand_forest(
-      mtry = floor(sqrt(ncol(inner_train) - 1)),# overridden by tuning grid
-      min_n = 2,# overridden by tuning grid
-      trees = 1000
+      mtry = floor(sqrt(ncol(inner_train) - 1)),
+      min_n = 2
     ) %>%
       set_engine("ranger") %>%
       set_mode("regression")
@@ -844,80 +799,11 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
   
   best_params <- tune_results %>% select_best(metric = "rmse")
   final_workflow <- finalize_workflow(biochar_workflow, best_params)
-  } else if (model_type == "brnn") {
-       num_predictors <- ncol(train_data) - 2  # Adjust if more metadata columns exist
-       max_hidden_units <- min(20, floor(log2(num_predictors)))  # Choose sqrt(features) but cap at 5
-
-    brnn_grid <- grid_random(
-      hidden_units(range = c(1, max_hidden_units)),
-      penalty(range = c(0.001, 0.1)),
-      size = 10
-    )
-    
-    tune_results <- tune_grid(
-      biochar_workflow,
-      resamples = cv_folds,
-      grid = brnn_grid,
-      metrics = metric_set(rmse),
-      control = control_grid(save_pred = TRUE)
-    )
-
-    best_params <- tune_results %>% select_best(metric = "rmse")
-    final_workflow <- finalize_workflow(biochar_workflow, best_params)
-    
-    } else if (model_type == "gbdt") {
-      
-      set.seed(123)
-    #cv_folds <- vfold_cv(train_data, v = min(10, nrow(train_data) - 1))  # Reduce CV folds
-    cv_folds <- vfold_cv(train_data, v = ifelse(nrow(train_data) < 30, 5, min(10, nrow(train_data) - 1)))
-      # Define a GBDT-specific tuning grid
-      gbdt_grid <- grid_random(
-        trees(range = c(50, 200)),  # Tune number of trees #tried 300
-        #tree_depth(range = c(3, 10)),  # Tune tree depth
-        tree_depth(range = c(2, min(4, round(log2(nrow(train_data)))))),  # Log-based depth scaling
-        learn_rate(range = c(0.005, 0.03 )),  # Tune learning rate #Tried (0.1, 0.3)
-        loss_reduction(range = c(0, 5)),  # Add back to control unnecessary splits
-        min_n(range = c(2, min(10, round(0.05 * nrow(train_data))))),  # Bring back to prevent overfitting
-        mtry(range = c(ceiling(0.05 * ncol(train_data)), min(15, floor(0.4 * ncol(train_data))))),
-        # Proportion of predictors sampled at each split
-        size = 10 #10
-      )
-      
-      # Tune the GBDT model using the grid
-      tune_results <- tryCatch({
-        tune_grid(
-          biochar_workflow,
-          resamples = cv_folds,
-          grid = gbdt_grid,
-          metrics = metric_set(rmse),
-          control = control_grid(save_pred = TRUE)
-        )
-      }, error = function(e) {
-        warning("Error during GBDT tuning: ", e$message)
-        return(NULL)
-      })
-
-      # If tuning failed, return NULL
-      if (is.null(tune_results)) return(NULL)
-
-      # Select the best parameters based on RMSE
-      best_params <- tune_results %>% select_best(metric = "rmse")
-      # Finalize the workflow with the best parameters
-      final_workflow <- finalize_workflow(biochar_workflow, best_params)
-      
-    }
+}
+  
   
   # Fit the final model
   model_fit <- fit(final_workflow, data = train_data)
-  
-#   model_fit <- tryCatch(
-#   fit(final_workflow, data = train_data),
-#   error = function(e) {
-#     message("Error in model fitting: ", e$message)
-#     return(NULL)
-#   }
-# )
-
 
   # Predictions for train and test data
   train_predictions <- tryCatch({
@@ -960,20 +846,27 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
 }
 ```
 
-#### PLSR
+#### 
 
-#### Tune to minimize RMSEP - MIR
+------------------------------------------------------------------------
 
-selecting the number of components that minimizes the RMSEP
+### Base model 2:
+
+#### Tune to capture explained variance - MIR
+
+-   Selecting the number of components to capture 90% and 95% of the explained variance in the predictor and response variables respectively.
+-   Note: ' prop_expl_var\$X and prop_expl_var\$Y represent the proportion of explained covariance for each component in the predictor (X) and response (Y) matrices.' - same could be achieved using
+
+To Do: Need to verify what prop_expl_var is actually calculating - unclear if it's variance.
 
 Total split
 
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_99perc")  # For RMSEP
+identifier <- initialize_workspace("PLSR_Variance_MIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", property_range = 49:51)
+                   use_source = FALSE, tuning_goal = "variance")
 ```
 
 Source-based split
@@ -981,9 +874,9 @@ Source-based split
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_99perc")  # For RMSEP
+identifier <- initialize_workspace("PLSR_Variance_MIR_sourcesplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep")
+                   use_source = TRUE, tuning_goal = "variance")
 ```
 
 Cornell only Predictions (focused on pH)
@@ -991,129 +884,21 @@ Cornell only Predictions (focused on pH)
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_CornellOnlysplit_99perc")  # For RMSEP
+identifier <- initialize_workspace("PLSR_Variance_MIR_CornellOnlysplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep")
+                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "variance")
 ```
 
-#### Tune to minimize RMSEP - MIR 80/20 Split
-
-Need to change 0.7 to 0.8
-
-```         
-set.seed(123) 
-# Split ensuring Source is represented in both subsets
-trainIndex <- createDataPartition(df.sel$Source, p = 0.7, list = FALSE)
-
-} else { set.seed(123) # Split without considering Source trainIndex <- sample(seq_len(nrow(df.sel)), size = 0.7 * nrow(df.sel))
-```
-
-selecting the number of components that minimizes the RMSEP
-
-Total split
-
-```{r}
-# 
-# # Run analysis for all properties
-# identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_99perc_80_20")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-#                    use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
-```
-
-Source-based split
-
-```{r}
-# 
-# # Run analysis for all properties
-# identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_99perc_80_20")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-#                    use_source = TRUE, tuning_goal = "rmsep")
-```
-
-Cornell only Predictions (focused on pH)
-
-```{r}
-
-# # Run analysis for all properties
-# identifier <- initialize_workspace("PLSR_RMSEP_MIR_CornellOnlysplit_99perc_80_20")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep")
-```
-
-#### Lab Covariate - MIR
-
-Zero-variance predictors don’t contribute to PLS components since they hold no information.
-
-	•	Removing them has a marginal effect because PLSR naturally assigns zero weight to irrelevant predictors.
-
-	•	Edge case: If your dataset is very small, leaving zero-variance predictors might slightly affect component selection due to noise in variance calculations.
-
-Total split
-
-```{r}
-
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_Lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", property_range = 49:51)
-```
-
-Source-based split
-
-```{r}
-
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_Lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep")
-```
-
-Cornell only Predictions (focused on pH)
-
-\*\* don't make a difference
-
-#### Tune to minimize RMSEP - NIR
+#### Tune to capture explained variance - NIR
 
 Total split - NIR
 
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_NIR_totsplit_99perc")  # For RMSEP
+identifier <- initialize_workspace("PLSR_Variance_NIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep")
-```
-
-Source-based split - NIR
-
-```{r}
-
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_NIR_sourcesplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep")
-```
-
-Cornell only Predictions - NIR
-
-```{r}
-
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_NIR_CornellOnlysplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep")
-```
-
-#### Tune to minimize RMSEP - MIR + NIR
-
-Total split - MIR + NIR
-
-```{r}
-
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_totsplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep")
+                   use_source = FALSE, tuning_goal = "variance")
 ```
 
 Source-based split - MIR + NIR
@@ -1121,9 +906,9 @@ Source-based split - MIR + NIR
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_sourcesplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep")
+identifier <- initialize_workspace("PLSR_Variance_NIR_sourcesplit_99perc")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
+                   use_source = TRUE, tuning_goal = "variance")
 ```
 
 Cornell only Predictions - MIR + NIR
@@ -1131,21 +916,21 @@ Cornell only Predictions - MIR + NIR
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_CornellOnlysplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep")
+identifier <- initialize_workspace("PLSR_Variance_NIR_CornellOnlysplit_99perc")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
+                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "variance")
 ```
 
-#### Lab Covariate - MIR + NIR
+#### Tune to capture explained variance - MIR + NIR
 
 Total split - MIR + NIR
 
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_totsplit_Lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", property_range = 49:51)
+identifier <- initialize_workspace("PLSR_Variance_MIR_NIR_totsplit_99perc")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
+                   use_source = FALSE, tuning_goal = "variance")
 ```
 
 Source-based split - MIR + NIR
@@ -1153,463 +938,463 @@ Source-based split - MIR + NIR
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_sourcesplit_Lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep")
+identifier <- initialize_workspace("PLSR_Variance_MIR_NIR_sourcesplit_99perc")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
+                   use_source = TRUE, tuning_goal = "variance")
 ```
 
 Cornell only Predictions - MIR + NIR
 
-\*\* doesn't make sense to run
+```{r}
 
-### RANDOM FOREST
+# Run analysis for all properties
+identifier <- initialize_workspace("PLSR_Variance_MIR_NIR_CornellOnlysplit_99perc")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
+                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "variance")
+```
 
-#### Tune to minimize RMSEP - MIR
+### Imputations
+
+#### KNN - using total split
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", property_range = 49:51)
+
+# Perform KNN imputation
+df1_KNN5_impt <- kNN(df1, k = 5,
+                      #weights = "auto")#, #Control how variables contribute to the distance calculation. Use weights = "auto" to let the function automatically calculate weights based on variable importance (via random forest
+                      useImputedDist = FALSE, #Control whether imputed values are used for calculating distances during the imputation of other variables.
+                      #FALSE to avoid dependencies between variables.
+                      #weightDist = TRUE)#, #TRUE to give closer neighbors more weight.
+                      methodStand = "iqr", #) #Controls the standardization method for numeric variables in the Gower distance.
+                      addRF = TRUE
+                      )  
 ```
 
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
-```
-
-```{r}
-identifier <- initialize_workspace("RF_RMSEP_MIR_CornellOnlysplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep") #,property_range = 25:55)
-
-```
-
-#### Tune to minimize RMSEP - MIR 80/20 Split
-
-```{r}
-# 
-# identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_99perc_80_20")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-#                    use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
-```
-
-```{r}
-
-# identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_99perc_80_20")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-#                    use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
-```
-
-```{r}
-# identifier <- initialize_workspace("RF_RMSEP_MIR_CornellOnlysplit_99perc_80_20")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep") #,property_range = 25:55)
-
-```
-
-#### Lab Covariate - MIR 
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
-```
-
-#### No Zero Variance - MIR 
-
--   Identifies **columns (wavenumbers) where all values are identical** (e.g., every row has 0.5 at a certain wavenumber). These predictors provide **no information** because their standard deviation is **zero**.
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_CornellOnlysplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-
-```
-
-#### Lab Covariate & No Zero Variance- MIR 
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-```
-
-#### Tune to minimize RMSEP - NIR
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
-```
-
-```{r}
-identifier <- initialize_workspace("RF_RMSEP_NIR_CornellOnlysplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep") #,property_range = 25:55)
-
-```
-
-#### Lab Covariate - NIR 
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
-```
-
-#### No Zero Variance - NIR 
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_NIR_CornellOnlysplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-
-```
-
-#### Lab Covariate & No Zero Variance - NIR 
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-```
-
-#### Tune to minimize RMSEP - MIR + NIR
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep")
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep")
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_CornellOnlysplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell",tuning_goal = "rmsep")
-
-
-#Note: skips testing of all properties - insufficient data. 
-```
-
-#### Lab Covariate - MIR + NIR
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
-```
-
-#### No Zero Variance - MIR +NIR
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_CornellOnlysplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-```
-
-#### Lab Covariate & No Zero Varaiance - MIR + NIR
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-```
-
-## GBDT
+Impute the entire dataset
 
 ```{r}
 
 # Run analysis for all properties
-identifier <- initialize_workspace("GBDT_RMSEP_MIR_totsplit")
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_99perc_KNN5")  # For RMSEP
+run_all_properties(slprptr, df1_KNN5_impt, spec_trt, model_type = "pls", identifier, 
+                   use_source = FALSE, tuning_goal = "rmsep")
+```
 
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt,
-  model_type = "gbdt",  # Specify GBDT
-  use_source = FALSE,
-  tuning_goal = "rmsep",
-  identifier,
-  property_range = 52:55#length(slprptr)
+#### Davis dataset
+
+Matching the feedstock ID between 2 datasets.
+
+```{r}
+
+# Load datasets
+user_data <- readRDS("df.f.RDS")
+davis_data <- read.csv("davis_data.csv")
+ 
+# Apply filtering
+entries_to_remove <- c(
+  "Enders et al., Bioresource Technology 114 (2012) 644-653.  ",
+  "Enders et al., Bioresource Technology 114 (2012) 644-653. ",
+  "Enders et al., Bioresource Technology 114 (2012) 644-653."
 )
+
+davis_data <- davis_data %>%
+  filter(!Reference %in% entries_to_remove)
+
+# Rename columns for consistency
+names(davis_data) <- str_replace_all(names(davis_data), "\\.+", "_")
+names(user_data) <- str_replace_all(names(user_data), "\\.+", "_")
+
+
+# Function to simplify feedstock strings
+
+simplify_feedstock <- function(feedstock) {
+  feedstock <- str_to_lower(feedstock) %>%
+    str_replace_all("sugar cane", "sugarcane") %>%  # Replace specific terms
+    str_replace_all("hard wood", "hardwood") %>% 
+    str_replace_all("soft wood", "softwood") %>% 
+    str_remove_all("\\(.*?\\)|[0-9]+|°c|\\bshells?\\b|\\bchar\\b|\\bwith\\b|\\bw\\/\\b|\\bpaste\\b|\\+") %>%
+    str_squish()  # Remove extra spaces
+  return(feedstock)
+}
+
+# Simplify feedstock strings in user_data
+user_data <- user_data %>%
+  mutate(Simplified_Feedstock = simplify_feedstock(paste(Feedstock, Class, Char, sep = " ")))
+
+# Simplify strings in the Davis dataset to broaden matching
+davis_data <- davis_data %>%
+  mutate(
+    Simplified_Feedstock = str_to_lower(
+      str_remove_all(
+        paste(Feedstock_Composition, Biochar_Name, Optional_comments_about_Feedstock, sep = " "),
+        "\\(.*?\\)|[0-9]+|°c"
+      )
+    ) %>%
+    str_replace_all("sugar cane", "sugarcane") %>%  # Replace specific terms
+    str_replace_all("hard wood", "hardwood") %>% 
+    str_replace_all("soft wood", "softwood") %>%
+    str_squish()  # Remove extra spaces
+  )
+
+primary_keywords <- c(
+  # From shells/fruit/nuts
+  "peanut", "pecan", "almond", "chestnut", "pistachio", "macadamia", "acorn", "hazelnut", "walnut", "nutshell",
+  "apricot", "plum", "orange", "pineapple", "grapeseed", "pomace", "olive", "palm_kernel",
+
+  # From wood/softwood/hardwood
+  "softwood", "hardwood", "oak", "hickory", "eucalyptus", "poplar", "willow", "beech", "cedar", "pine", "spruce", 
+  "fir", "bamboo", "mixed wood", "wood", "ash", "mesquite", "cottonwood",
+
+  # From straw/agricultural/crop waste
+  "corn", "wheat", "rice", "switchgrass", "miscanthus", "stover", "grass", "straw", "bagasse", "hemp", "rapeseed", 
+  "cane", "sugarcane", "bamboo chips", "maize",
+
+  # From manure/animal-based
+  "manure", "cow", "poultry", "horse", "swine", "goat", "turkey", "dairy", "human", "sewage", "biosolids",
+
+  # From sludge/industrial waste
+  "sludge", "wastewater", "municipal sludge", "waste", "paper", "compost",
+
+  # Miscellaneous
+  "algae", "charcoal", "cocoa", "artichoke", "buckwheat", "spirulina", "guayule", "soybean", "coffee", "tea",
+  "durian", "tomato", "waterweed", "shrimp", "bone"
+)
+
+# Secondary mapping
+secondary_mapping <- list(
+  # Nuts mapped to shells
+  shells = c("peanut", "pecan", "almond", "chestnut", "pistachio", "nutshell", "macadamia", "acorn", "walnut", "hazelnut"),
+  
+  # Manure/Animal-Based
+  manure = c("cow", "poultry", "horse", "swine", "goat", "turkey", "human", "dairy"),
+  
+  # Fruits
+  fruit = c("apricot", "plum", "orange", "pineapple", "grapeseed", "pomace", "olive", "palm_kernel", "cocoa", "coffee"),
+  
+  # Straw/Crop Waste
+  straw = c("wheat", "rice", "rapeseed", "reed", "maize straw"),
+  grass = c("switchgrass", "miscanthus", "giant reed", "fodder grass", "grass"),
+  maize = c("cob", "stover", "bagasse"),
+  
+  # Wood/Hardwood/Softwood
+  hardwood = c("hardwood","oak", "hickory", "eucalyptus", "poplar", "walnut", "willow", "beech", "ash", "cottonwood", "mesquite"),
+  softwood = c("softwood", "pine", "spruce", "fir", "cedar"),
+  wood = c("wood", "mixed wood"),
+  
+  # Sludge/Industrial Waste
+  sludge = c("sewage", "biosolids", "wastewater", "municipal sludge"),
+  industrial = c("waste", "paper", "compost"),
+  
+  # Miscellaneous
+  algae = c("algae", "spirulina", "waterweed"),
+  
+  # Default Fallback
+  default = c("other")
+)
+
+
+
+tertiary_mapping <- list(
+  agricultural = c("corn", "grass", "switchgrass", "wheat", "rice", "bagasse", "stover", "straw", "bamboo", "miscanthus"),
+  `wood-based` = c("wood", "pine", "oak", "hardwood", "softwood", "chips", "sawdust", "pellets", "bark"),
+  `animal-based` = c("manure", "cow", "bull", "poultry", "dairy", "sewage", "swine", "horse", "litter"),
+  `food-based` = c("nutshell", "macadamia", "acorn", "walnut", "peanut", "pecan", "almond", "chestnut", "pistachio", 
+                   "fruit", "pomace", "coconut", "plum", "orange", "pineapple", "apricot"),
+  `industrial/other` = c("waste", "sludge", "biosolids", "trash", "paper", "pit", "stone", "kernel")
+)
+
+# # Matching function with Primary, Secondary, and Tertiary logic
+match_feedstock <- function(feedstock, secondary_mapping, tertiary_mapping) {
+  if (is.na(feedstock) || nchar(feedstock) == 0) {
+    return(c(Primary = "Unknown", Secondary = "Unknown", Tertiary = "Unknown"))
+  }
+  
+  # Tokenize feedstock
+  tokens <- str_split(feedstock, "\\s+")[[1]]
+  
+  # Match Primary: Prioritize specific terms first
+  primary_match <- NULL
+  for (category in names(secondary_mapping)) {
+    specific_matches <- intersect(tokens, secondary_mapping[[category]])
+    if (length(specific_matches) > 0) {
+      primary_match <- specific_matches[1]
+      break
+    }
+  }
+  primary_match <- ifelse(!is.null(primary_match), primary_match, "other")
+  
+  # Match Secondary: Ensure it aligns with the Primary category
+  if (primary_match != "other") {
+    secondary_match <- names(secondary_mapping)[sapply(secondary_mapping, function(x) primary_match %in% x)]
+    secondary_match <- ifelse(length(secondary_match) > 0, secondary_match[1], "other")
+  } else {
+    # General fallback for Secondary
+    secondary_match <- names(secondary_mapping)[sapply(secondary_mapping, function(x) any(tokens %in% x))]
+    secondary_match <- ifelse(length(secondary_match) > 0, secondary_match[1], "other")
+  }
+  
+  # Match Tertiary: Broad classification
+  tertiary_match <- names(tertiary_mapping)[sapply(tertiary_mapping, function(x) any(x %in% tokens))]
+  tertiary_match <- ifelse(length(tertiary_match) > 0, tertiary_match[1], "Other")
+  
+  return(c(Primary = primary_match, Secondary = secondary_match, Tertiary = tertiary_match))
+}
+
+# Apply the updated logic to user_data
+user_data <- user_data %>%
+  rowwise() %>%
+  mutate(
+    Match_Result = list(match_feedstock(Simplified_Feedstock, secondary_mapping, tertiary_mapping)),
+    Primary_Feedstock = Match_Result[["Primary"]],
+    Secondary_Feedstock = Match_Result[["Secondary"]],
+    Tertiary_Feedstock = Match_Result[["Tertiary"]]
+  ) %>%
+  ungroup() %>%
+  dplyr::select(-Match_Result)
+
+# Apply the updated logic to davis_data
+davis_data <- davis_data %>%
+  rowwise() %>%
+  mutate(
+    Match_Result = list(match_feedstock(Simplified_Feedstock, secondary_mapping, tertiary_mapping)),
+    Primary_Feedstock = Match_Result[["Primary"]],
+    Secondary_Feedstock = Match_Result[["Secondary"]],
+    Tertiary_Feedstock = Match_Result[["Tertiary"]]
+  ) %>%
+  ungroup() %>%
+  dplyr::select(-Match_Result)
+
+
+ user_data <- user_data %>%
+    rename(Temperature = Temp_) 
+    
+    # Match columns for ash and total C between datasets
+davis_data <- davis_data %>%
+    rename(Temperature = Temperature_C_) %>% 
+    mutate(
+      SSN = paste0("davis_", row_number()), # Create unique SSN for davis_data
+      Ash_avg = Total_Ash_Content_ / 100, # Convert percent to decimal
+      C_tot_avg = Total_C_Used_in_Plot / 100
+  )
+
+# Save the datasets as Excel files
+# write_xlsx(user_data, "user_data.xlsx")
+# write_xlsx(davis_data, "davis_data.xlsx")
+
 ```
+
+##### Imputing only pH from davis dataset
 
 ```{r}
 
-# # Run analysis for all properties
-# identifier <- initialize_workspace("GBDT_RMSEP_MIR_sourcesplit") 
-# 
-# run_all_properties(
-#   slprptr = slprptr,
-#   df1 = df1,
-#   spec_trt = spec_trt,
-#   model_type = "gbdt",  # Specify GBDT
-#   use_source = TRUE,
-#   tuning_goal = "rmsep",
-#   identifier,
-#   property_range = 2:length(slprptr)
-# )
+# Combine user_data and davis_data
+combined_data <- bind_rows(
+  user_data %>%
+    mutate(dataset = "user"),
+  davis_data %>%
+    mutate(dataset = "davis")
+)
+
+# Select only relevant columns for grouping and imputation
+combined_data <- combined_data %>%
+  dplyr::select(SSN, pH, Primary_Feedstock, Temperature, dataset)
+
+# KNN Imputation with Temperature
+knn_impute_with_temp <- function(data) {
+  # Identify rows with missing pH
+  missing_idx <- which(is.na(data$pH))
+  
+  # If no missing values, return original data
+  if (length(missing_idx) == 0) return(data)
+  
+  # Split data into training and testing sets
+  train <- data %>% filter(!is.na(pH) & !is.na(Temperature)) # Complete cases only
+  test <- data %>% filter(is.na(pH) & !is.na(Temperature))   # Missing pH but with valid Temperature
+  
+  # If no valid training or testing data, skip imputation
+  if (nrow(train) == 0 || nrow(test) == 0) return(data)
+  
+  # Dynamically adjust k
+  k <- min(5, nrow(train)) # Use the smaller of 5 or the number of training rows
+  
+  # Apply KNN regression
+  knn_result <- knn.reg(
+    train = train %>% dplyr::select(Temperature) %>% as.matrix(), # Temperature as predictor
+    test = test %>% dplyr::select(Temperature) %>% as.matrix(),  # Temperature as predictor
+    y = train$pH,                                         # Non-missing pH values
+    k = k
+  )
+  
+  # Impute missing values
+  data$pH[is.na(data$pH) & !is.na(data$Temperature)] <- knn_result$pred
+  return(data)
+}
+
+# Group by Primary_Feedstock and apply KNN Imputation
+imputed_data <- combined_data %>%
+  group_by(Primary_Feedstock) %>%
+  group_modify(~ knn_impute_with_temp(.x)) %>%
+  ungroup()
+
+# Replace user_data pH values with imputed values
+user_data <- user_data %>%
+  left_join(
+    imputed_data %>%
+      filter(dataset == "user") %>%
+      dplyr::select(SSN, pH) %>% # Keep SSN to avoid duplicates
+      rename(pH_imputed = pH), # Rename the imputed pH column
+    by = "SSN"
+  ) %>%
+  mutate(pH = if_else(is.na(pH), pH_imputed, pH)) %>% # Replace missing pH values
+  dplyr::select(-pH_imputed) # Drop the imputed column
 ```
 
-```{r}
-
-# # Run analysis for all properties
-# identifier <- initialize_workspace("GBDT_RMSEP_MIR_CornellOnlysplit") 
-# 
-# run_all_properties(
-#   slprptr = slprptr,
-#   df1 = df1,
-#   spec_trt = spec_trt,
-#   model_type = "gbdt",  # Specify GBDT
-#   use_source = FALSE,
-#   source_name = "Cornell ",
-#   tuning_goal = "rmsep",
-#   identifier,
-#   property_range = 2:length(slprptr)
-# )
-```
-
-## BRNN
+#### PLSR - Davis Imputed
 
 #### Tune to minimize RMSEP - MIR
 
+selecting the number of components that minimizes the RMSEP
+
+Davis imputed pH- Temp, feedstock
+
 ```{r}
 
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt,
-  model_type = "brnn",
-  use_source = FALSE,
-  tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit"), 
-  property_range = 2:length(slprptr),
-  include_pca = TRUE
+# Replace `pH` in df1 with `pH` from user_data based on SSN
+new_df <- df1 %>%
+  left_join(user_data %>% dplyr::select(SSN, pH) %>% rename(pH_user_data = pH), by = "SSN") %>%
+  mutate(pH = if_else(!is.na(pH_user_data), pH_user_data, pH)) %>%
+  dplyr::select(-pH_user_data)  # Drop the temporary column
+    
+```
+
+Total Split
+
+```{r}
+# Run analysis for all properties
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_Davis_pH")  # For RMSEP
+run_all_properties(slprptr, new_df, spec_trt, model_type = "pls", identifier, 
+                   use_source = FALSE, tuning_goal = "rmsep")
+```
+
+Source Split
+
+```{r}
+
+# Run analysis for all properties
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_Davis_pH")  # For RMSEP
+run_all_properties(slprptr, new_df, spec_trt, model_type = "pls", identifier, 
+                   use_source = TRUE, tuning_goal = "rmsep")
+```
+
+Imputing Temp, C from Davis dataset
+
+```{r}
+
+
+# Combine datasets for consistent processing
+combined_data <- bind_rows(
+  user_data %>% mutate(dataset = "user"),
+  davis_data %>% mutate(dataset = "davis")
 )
+
+# Select only relevant columns for grouping and imputation
+combined_data <- combined_data %>%
+  dplyr::select(SSN, pH, Primary_Feedstock, Temperature, C_tot_avg, dataset)
+
+knn_impute_with_multiple_predictors <- function(data) {
+  # Identify rows with missing pH
+  missing_idx <- which(is.na(data$pH))
+  
+  # If no missing values, return original data
+  if (length(missing_idx) == 0) return(data)
+  
+  # Split data into training and testing sets
+  train <- data %>% filter(!is.na(pH) & !is.na(Temperature) & !is.na(C_tot_avg)) # Complete cases only
+  test <- data %>% filter(is.na(pH) & !is.na(Temperature) & !is.na(C_tot_avg))   # Missing pH but with valid predictors
+  
+  # If no valid training or testing data, skip imputation
+  if (nrow(train) < 5 || nrow(test) == 0) return(data)
+  
+  # Dynamically adjust k
+  k <- min(5, nrow(train))
+  
+  # Prepare training and test predictors
+  train_predictors <- train %>% dplyr::select("Temperature", "C_tot_avg") %>% as.matrix()
+  test_predictors <- test %>% dplyr::select("Temperature", "C_tot_avg") %>% as.matrix()
+  
+  # Apply KNN regression
+  knn_result <- knn.reg(
+    train = train_predictors,
+    test = test_predictors,
+    y = train$pH,
+    k = k
+  )
+  
+   
+  # Impute missing values
+  #data$pH[is.na(data$pH) & !is.na(Temperature) & !is.na(C_tot_avg)] <- knn_result$pred
+  data$pH[is.na(data$pH) & !is.na(data[["Temperature"]]) & !is.na(data[["C_tot_avg"]])] <- knn_result$pred
+  
+   
+  return(data)
+}
+
+# Group by Primary_Feedstock and apply KNN Imputation
+imputed_data <- combined_data %>%
+  group_by(Primary_Feedstock) %>%
+  group_modify(~ knn_impute_with_multiple_predictors(.x)) %>%
+  ungroup()
+
+# Replace user_data pH values with imputed values
+user_data <- user_data %>%
+  left_join(
+    imputed_data %>%
+      filter(dataset == "user") %>%
+      dplyr::select(SSN, pH) %>% # Keep SSN to avoid duplicates
+      rename(pH_imputed = pH), # Rename the imputed pH column
+    by = "SSN"
+  ) %>%
+  mutate(pH = if_else(is.na(pH), pH_imputed, pH)) %>% # Replace missing pH values
+  dplyr::select(-pH_imputed) # Drop the imputed column
+```
+
+Davis imputed pH - Temp, feedstock, C,
+
+```{r}
+
+# Replace `pH` in df1 with `pH` from user_data based on SSN
+new_df <- df1 %>%
+  left_join(user_data %>% dplyr::select(SSN, pH) %>% rename(pH_user_data = pH), by = "SSN") %>%
+  mutate(pH = if_else(!is.na(pH_user_data), pH_user_data, pH)) %>%
+  dplyr::select(-pH_user_data)  # Drop the temporary column
+    
+```
+
+Total Split
+
+```{r}
+# Run analysis for all properties
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_Davis_pH_2")  # For RMSEP
+run_all_properties(slprptr, new_df, spec_trt, model_type = "pls", identifier, 
+                   use_source = FALSE, tuning_goal = "rmsep", property_range = 2:30)
+```
+
+Source Split
+
+```{r}
+
+# Run analysis for all properties
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_Davis_pH_2")  # For RMSEP
+run_all_properties(slprptr, new_df, spec_trt, model_type = "pls", identifier, 
+                   use_source = TRUE, tuning_goal = "rmsep", property_range = 2:30)
 ```
 
 ```{r}
 
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt,
-  model_type = "brnn",
-  use_source = TRUE,
-  tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_sourcesplit"), 
-  property_range = 2:length(slprptr),
-  include_pca = TRUE
-)
+17.86+34.92+72.38
+
+337+417+2250 +1200+500+1000+100+5200+390+180+650+100+200+2480+2350+300+2500+200+500+1000+1300+450+1700+1400+2000+560+1500+600+5600+3500+320+4000+300+250+4090+5200+400+2200+750+400+1800+780+200+450+470+5200+15000+3500+2000+1000+570+2000+235+500+500+270+320+760+600+600+280+180+280+1000+700+2400+1190+900+275+3500+
+  
+  3000+1000
 ```
-
-#### Lab Covariate - MIR 
-
-```{r}
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_MIR_lab,
-  model_type = "brnn",
-  use_source = FALSE,
-  tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit_lab"), 
-  property_range = 2:length(slprptr),
-  include_pca = TRUE
-)
-```
-
-```{r}
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_MIR_lab,
-  model_type = "brnn",
-  use_source = TRUE,
-  tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_sourcesplit_lab"), 
-  property_range = 2:length(slprptr),
-  include_pca = TRUE
-)
-```
-
-#### Tune to minimize RMSEP - MIR + NIR
-
-```{r}
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_MIR_NIR,
-  model_type = "brnn",
-  use_source = FALSE,
-  tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_totsplit"), 
-  property_range = 2:length(slprptr),
-  include_pca = TRUE
-)
-```
-
-```{r}
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_MIR_NIR,
-  model_type = "brnn",
-  use_source = TRUE,
-  tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_sourcesplit"), 
-  property_range = 2:length(slprptr),
-  include_pca = TRUE
-)
-```
-
-#### Lab Covariate - MIR 
-
-```{r}
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_MIR_NIR_lab,
-  model_type = "brnn",
-  use_source = FALSE,
-  tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_totsplit_lab"), 
-  property_range = 2:length(slprptr),
-  include_pca = TRUE
-)
-```
-
-```{r}
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_MIR_NIR_lab,
-  model_type = "brnn",
-  use_source = TRUE,
-  tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_sourcesplit_lab"), 
-  property_range = 2:length(slprptr),
-  include_pca = TRUE
-)
-```
-
-#### 

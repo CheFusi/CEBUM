@@ -385,7 +385,7 @@ dir.create("Wavenumbers_vs_Loadings_PLSR_MIR")
 for(p in 3:length(slprptr)){
 #for(p in c(107)){
 #Select properties to predict one at a time and remove NAs  
-df.sel<-df.f %>% select(SSN, slprptr[p]) %>% na.omit
+df.sel<-df.f %>% dplyr::select(SSN, slprptr[p]) %>% na.omit
 
 df.sel <-subset(df.sel, df.sel[,2]>quantile(df.sel[,2], 0.05)&df.sel[,2] <quantile(df.sel[,2], 0.95))
 
@@ -718,7 +718,7 @@ dir.create("Wavenumbers_vs_Loadings_PLSR_MIR")
 # FUSI EDIT: started at 10 because of metadata
 for (p in 3:length(slprptr)) {
     # Select properties to predict one at a time and remove NAs  
-    df.sel <- df.f %>% select(SSN, slprptr[p]) %>% na.omit
+    df.sel <- df.f %>% dplyr::select(SSN, slprptr[p]) %>% na.omit
 
     # Original line using quantile-based filtering
     #df.sel_ <-subset(df.sel, df.sel[,2]>quantile(df.sel[,2], 0.05)&df.sel[,2] <quantile(df.sel[,2], 0.95))

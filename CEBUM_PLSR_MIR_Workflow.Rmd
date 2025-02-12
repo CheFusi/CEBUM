@@ -46,7 +46,8 @@ spec_trt_MIR_NIR_lab <- merge(spec_trt_MIR_lab,spec_trt_NIR_lab, by ="SSN")
 rownames(spec_trt_MIR_NIR_lab) <- spec_trt_MIR_NIR_lab$SSN
 
 # biochar property data
-df1<-readRDS("df1.RDS")
+#df1<-readRDS("df1.RDS")
+df1<-readRDS("df.f.RDS")
 
 # df.f: full dataset;
 # spec_trt: treated spectra
@@ -202,14 +203,18 @@ prepare_model_data <- function(cal_df, val_df, slprptr, .x) {
 }
 
 # Create a recipe for data preprocessing, with optional custom steps
-preprocess_data <- function(train_data, test_data, slprptr, p, recipe_steps = NULL,include_zv = FALSE, include_pca = FALSE) {
+preprocess_data <- function(train_data, test_data, slprptr, p, recipe_steps = NULL,include_zv = FALSE,
+                            include_pca = FALSE, 
+                            num_pca_comp = NULL, 
+                            variance_threshold = NULL) {
   # Check if train/test data is all NA
   if (all(is.na(train_data)) || all(is.na(test_data))) {
     warning("Preprocessing skipped due to all NA in train/test data.")
     return(list(
       recipe = NULL,
       train_data = data.frame(),  # Return an empty data frame as a placeholder
-      test_data = data.frame()
+      test_data = data.frame(),
+      n_comp_pca = NA
     ))
   }
   
@@ -226,13 +231,101 @@ step_nzv()
   }
   
   # Conditionally add PCA only if include_pca is TRUE
+  
+    # Check available numeric predictors **before** applying PCA
+
+  # Handle PCA selection
+  n_comp_pca <- NA  # Default to NA if PCA is not applied
+  
   if (include_pca) {
-    num_pca_comps <- min(50, nrow(train_data)-1)
-    
+    if (!is.null(num_pca_comp)) {
+      
+      # Ensure num_pca_comp does not exceed the number of samples - 1
+      # num_pca_comp_set <- min(num_pca_comp, ncol(train_data), nrow(train_data) - 1)
+      
+    num_pca_comp_set <- min(
+    num_pca_comp, 
+    ncol(train_data), 
+    nrow(train_data) - 1,  
+    max(10, floor(nrow(train_data) * 0.2))
+  )  
+
+  # Fallback to 5 components if the matrix is singular
+  if (num_pca_comp_set > (nrow(train_data) - 1) || num_pca_comp_set > (ncol(train_data) - 1)) {
+    message("Warning: num_pca_comp (", num_pca_comp, ") too high. Using fallback value of 5 components.")
+    num_pca_comp_set <- 5
+  }
+      
+
     recipe_base <- recipe_base %>%
-      step_pca(all_numeric_predictors(), num_comp = num_pca_comps)
+      step_pca(all_numeric_predictors(), num_comp = num_pca_comp_set)
+     n_comp_pca <- num_pca_comp_set  # Store the manually set component count
+
+         # Extract actual number of components chosen dynamically
+    prepped_recipe <- prep(recipe_base, training = train_data, retain = TRUE)
+    
+    # Extract the actual number of PCA components chosen based on variance
+    n_comp_pca_test <- prepped_recipe$steps[[1]]$num_comp 
+    
+    # Debugging messages to check values
+View(prepped_recipe)
+message(paste("Final num_pca_comp_set:", n_comp_pca_test))
+     
+     
+  } else if (!is.null(variance_threshold)) {
+    recipe_base_pca_variance <- recipe_base %>%
+      step_pca(all_numeric_predictors(), threshold = variance_threshold)
+    
+    # Extract actual number of components chosen dynamically
+    prepped_recipe <- prep(recipe_base_pca_variance, training = train_data, retain = TRUE)
+    
+    # Extract the actual number of PCA components chosen based on variance
+    n_comp_pca_variance <- prepped_recipe$steps[[1]]$num_comp  # Extracts the selected num_comp
+
+    # Ensure the number of PCA components does not exceed nrow(train_data) - 1
+    #num_pca_comp_set <- min(n_comp_pca_variance, ncol(train_data), nrow(train_data) - 1)
+numeric_cols <- train_data %>%
+  dplyr::select(where(is.numeric)) %>%
+  ncol()
+
+num_pca_comp_set <- max(
+  min(n_comp_pca_variance, numeric_cols, nrow(train_data) - 1, ncol(train_data) - 1),  
+  max(min(10, floor(nrow(train_data) * 0.2)), 2)  # Dynamic lower bound  #
+)
+
+    # Apply PCA step with the selected number of components
+    recipe_base <- recipe_base %>%
+      step_pca(all_numeric_predictors(), num_comp = num_pca_comp_set)
+
+    # Store the number of components for later use
+    n_comp_pca <- num_pca_comp_set
+    
+  } else {
+    warning("PCA was enabled but neither num_pca_comp nor variance_threshold was provided. PCA will not be applied.")
+  }
   }
   
+  # Ensure valid PCA selection
+  if (!is.na(n_comp_pca) && n_comp_pca < 2) {
+    warning(paste("Skipping PCA for", slprptr[p], "- not enough valid components after preprocessing."))
+    return(list(
+      recipe = NULL,
+      train_data = train_data,
+      test_data = test_data,
+      n_comp_pca = NA
+    ))
+  }
+  
+  message("DEBUG: Inside preprocess_data()")
+message(paste("DEBUG: include_pca =", include_pca))
+message(paste("DEBUG: num_pca_comp =", num_pca_comp))
+#message(paste("DEBUG: variance_threshold =", variance_threshold))
+message(paste("DEBUG: Final n_comp_pca =", n_comp_pca))
+message(paste("DEBUG: Final n_comp_pca_set =", num_pca_comp_set))
+
+if (is.null(n_comp_pca) || is.na(n_comp_pca)) {
+    stop("ERROR: n_comp_pca is NULL in preprocess_data()!")
+}
   
   # Apply additional preprocessing steps as needed
   if (!is.null(recipe_steps)) {
@@ -241,7 +334,7 @@ step_nzv()
     }
   }
   
-  return(list(recipe = recipe_base, train_data = train_data, test_data = test_data))
+  return(list(recipe = recipe_base, train_data = train_data, test_data = test_data, n_comp_pca = n_comp_pca))
 }
 
 # Set up PLS or Random Forest model specification, including tuning parameters
@@ -301,22 +394,6 @@ setup_model <- function(model_type, train_data = NULL, response_var = NULL) {
   }
   return(list(model_spec = model_spec, mtry_range = mtry_range))
 }
-#***** 
-
-# # Function to fit both models (PLS and Random Forest) for comparison
-# fit_both_models <- function(train_data, test_data, recipe) {
-#   model_list <- list(
-#     pls = setup_model("pls"),
-#     rf = setup_model("rf", train_data = train_data),
-#     
-#   )
-#   model_types <- names(model_list)
-#   
-#   # Fit each model type and return results
-#   results <- purrr::map2(model_list, model_types, ~ fit_model(.x, train_data, test_data, recipe, .y))
-#   return(results)
-# }
-
 
 calculate_metrics <- function(data, predictions, data_type, slprptr, .x, best_params, model_type, test_data) {
   response_var <- slprptr[.x]  # Define response variable
@@ -346,13 +423,16 @@ calculate_metrics <- function(data, predictions, data_type, slprptr, .x, best_pa
     Data_Type = data_type,
     Model = model_type,
     Comps = if (model_type == "pls") best_params$num_comp else NA,
-    mtry = if (model_type == "rf") best_params$mtry else NA,
-    min_n = if (model_type == "rf") best_params$min_n else NA,
+    #mtry = if (model_type == "rf") best_params$mtry else NA,
+    #min_n = if (model_type == "rf") best_params$min_n else NA,
+    mtry = if (model_type %in% c("rf", "gbdt")) best_params$mtry else NA,  
+    min_n = if (model_type %in% c("rf", "gbdt")) best_params$min_n else NA,  
     N = nrow(data),
     R2 = r2_value,
     RMSE = rmse_value,
     RMSEP_range_ratio = rmse_range_ratio,
     bias = bias_value
+    #n_comp_pca = if (include_pca) n_comp_pca else NA  # Only assign if PCA was applied
   )
 
   return(metrics_tibble)
@@ -471,7 +551,7 @@ plot_well_fitted_r2 <- function(all_metrics, identifier) {
 # Wrapper function to run analysis for each property in slprptr with specified model_type (no default)
 run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier, 
                                 use_source = FALSE, source_name = NULL, tuning_goal = "rmsep",
-                                property_range = 2:length(slprptr),  include_zv = FALSE, include_pca = FALSE) {
+                                property_range = 2:length(slprptr), include_zv = FALSE, include_pca = FALSE, num_pca_comp = NULL, variance_threshold = NULL) {
   #all_metrics <<- tibble()  # Initialize global metrics storage
   model_results <- list()  # Store model fits for later use
   output_dir <- paste0("Plots_WellFitted_Properties_", identifier)  # Use existing directory
@@ -484,7 +564,7 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
   
   # Loop through each property in the specified range and collect metrics
   all_metrics <- purrr::map_dfr(property_range, function(.x) {
-    message("Processing property index: ", .x, " - Property: ", slprptr[.x])
+    message("Processing property: ", .x, " : ", slprptr[.x])
     # Select and filter the property data
     property_data <- select_property_data(slprptr, .x, df1, spec_trt)
     df.f <- property_data$df.f
@@ -504,7 +584,14 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
     # Prepare train/test data and preprocess (e.g., removing outliers)
     data_prep <- prepare_model_data(cal_df, val_df, slprptr, .x)  # Converts calibration and validation datasets to train/test format
     recipe_data <- preprocess_data(data_prep$train_data, data_prep$test_data, slprptr, .x, 
-      include_pca = include_pca, include_zv)  # Handles preprocessing steps
+      include_zv=include_zv, include_pca = include_pca,  num_pca_comp = num_pca_comp, variance_threshold = variance_threshold)  # Handles preprocessing steps
+    
+    #Ensure train_data and test_data are updated after additional step e.g. step_pca
+    train_data <- recipe_data$train_data
+    test_data <- recipe_data$test_data
+    
+    n_comp_pca <- recipe_data$n_comp_pca 
+    message(paste("DEBUG: Extracted n_comp_pca from preprocess_data():", n_comp_pca))
     
     # Ensure train/test data is not empty after preprocessing
     if (nrow(recipe_data$train_data) == 0 || nrow(recipe_data$test_data) == 0) {
@@ -531,7 +618,12 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
       stop(paste("Unsupported model type:", model_type))  # Error for unsupported models
     }
     
+    
     # Fit the model using the specified tuning goal (e.g., RMSEP) and handle errors gracefully
+    
+    message(paste("DEBUG: Passing n_comp_pca to fit_model():", n_comp_pca))
+
+  
     model_fit <- tryCatch(
       {
         fit_model(
@@ -541,7 +633,12 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
           recipe = recipe_data$recipe, 
           model_type = model_type, 
           tuning_goal = tuning_goal,
-          property_name = slprptr[.x]
+          property_name = slprptr[.x],
+          include_zv = include_zv,
+          include_pca = include_pca,
+          variance_threshold = variance_threshold,
+          num_pca_comp = num_pca_comp,
+          n_comp_pca = n_comp_pca 
         )
       },
       error = function(e) {
@@ -669,8 +766,9 @@ calculate_explained_variance <- function(train_data, response_var, max_comps) {
 
 # Main fit_model function
 fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type,
-                      tuning_goal = "rmsep", cumulative_variance_threshold = 0.85,property_name = NULL) {
-
+                      tuning_goal = "rmsep", cumulative_variance_threshold = 0.85,property_name = NULL,include_zv = FALSE, variance_threshold = NULL, include_pca = FALSE,  n_comp_pca_variance = NULL,num_pca_comp = NULL,  n_comp_pca = NULL) { 
+  message("DEBUG: n_comp_pca inside fit_model(): ", n_comp_pca)
+  
   model_spec <- model_spec_list$model_spec
   mtry_range <- model_spec_list$mtry_range  # Only for Random Forest
 
@@ -696,8 +794,12 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
   } else {
     vfold_cv(train_data, v = 10)  # 10-fold CV
   }
-    
-    max_comps <- min(25, nrow(test_data) - 1)  # Limit max components
+      # Ensure max_comps considers both num_pca_comp and variance_threshold dynamically
+    if (isTRUE(include_pca) && !is.null(n_comp_pca)) {
+    max_comps <- min(25, nrow(train_data) - 1,  ncol(train_data), n_comp_pca)
+  } else {
+    max_comps <- min(25, nrow(train_data) - 4,  ncol(train_data))
+  }
 
     if (tuning_goal == "rmsep") {
       # Perform 10-fold (or LOOCV) to minimize RMSEP
@@ -777,36 +879,36 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
     }
   } else if (model_type == "rf") {
   set.seed(123)
-  n_rows <- nrow(train_data)
+  
   
   # Dynamically adjust folds
-  cv_folds <- if (n_rows <= 20) {
-    vfold_cv(train_data, v = min(floor(n_rows / 2), 5))  # Cap folds for small datasets
+  cv_folds <- if (nrow(train_data) <= 20) {
+    vfold_cv(train_data, v = min(floor(nrow(train_data) / 2), 5))  # Cap folds for small datasets
   } else {
-    vfold_cv(train_data, v = min(10, n_rows - 1))  # Default for larger datasets
+    vfold_cv(train_data, v = min(10, nrow(train_data) - 1))  # Default for larger datasets
   }
   
   # Log fold details
   #message("Number of folds: ", length(cv_folds$splits))
-  test_sizes <- purrr::map_int(cv_folds$splits, ~ nrow(assessment(.x)))
-  train_sizes <- purrr::map_int(cv_folds$splits, ~ nrow(analysis(.x)))
+  #test_sizes <- purrr::map_int(cv_folds$splits, ~ nrow(assessment(.x)))
+  #train_sizes <- purrr::map_int(cv_folds$splits, ~ nrow(analysis(.x)))
   #message("Test set sizes: ", paste(test_sizes, collapse = ", "))
   #message("Train set sizes: ", paste(train_sizes, collapse = ", "))
   
   # Fallback for very small datasets
-  if (n_rows < 20 || min(test_sizes) < 5) {
-    warning("Dataset too small for cross-validation. Using fixed train-test split.")
+  # if (nrow(train_data) < 20 || min(test_sizes) < 5) {
+  #   warning("Dataset too small for cross-validation. Using fixed train-test split.")
+  #   
+  #   split <- initial_split(train_data, prop = 0.8)
+  #   inner_train <- training(split)
+  #   inner_test <- testing(split)
     
-    split <- initial_split(train_data, prop = 0.8)
-    inner_train <- training(split)
-    inner_test <- testing(split)
-    
-    if (nrow(inner_train) < 5 || nrow(inner_test) < 2) {
-      stop("Insufficient data for fixed split. Skipping property.")
-    }
+    # if (nrow(inner_train) < 5 || nrow(inner_test) < 2) {
+    #   stop("Insufficient data for fixed split. Skipping property.")
+    # }
     
     rf_model <- rand_forest(
-      mtry = floor(sqrt(ncol(inner_train) - 1)),# overridden by tuning grid
+      mtry = floor(sqrt(ncol(train_data) - 1)),# overridden by tuning grid
       min_n = 2,# overridden by tuning grid
       trees = 1000
     ) %>%
@@ -817,17 +919,17 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
       add_recipe(recipe) %>%
       add_model(rf_model)
     
-    model_fit <- fit(final_workflow, data = inner_train)
-    predictions <- predict(model_fit, inner_test)
+    #model_fit <- fit(final_workflow, data = train_data)
+    #predictions <- predict(model_fit, inner_test)
     
-    return(list(model = model_fit, predictions = predictions))
-  }
+    # return(list(model = model_fit, predictions = predictions))
+  #}
   
   # Dynamically adjust grid size
   rf_grid <- grid_random(
     mtry_range,
-    min_n(range = c(1, min(5, floor(n_rows / 3)))),  # Smaller range for min_n
-    size = min(n_rows / length(cv_folds$splits), 5)  # Adjust grid size dynamically
+    min_n(range = c(1, min(5, floor(nrow(train_data) / 3)))),  # Smaller range for min_n
+    size = min(nrow(train_data) / length(cv_folds$splits), 5)  # Adjust grid size dynamically
   )
   
   # Log grid size
@@ -844,6 +946,7 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
   
   best_params <- tune_results %>% select_best(metric = "rmse")
   final_workflow <- finalize_workflow(biochar_workflow, best_params)
+  
   } else if (model_type == "brnn") {
        num_predictors <- ncol(train_data) - 2  # Adjust if more metadata columns exist
        max_hidden_units <- min(20, floor(log2(num_predictors)))  # Choose sqrt(features) but cap at 5
@@ -918,7 +1021,6 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
 #   }
 # )
 
-
   # Predictions for train and test data
   train_predictions <- tryCatch({
     predict(model_fit, new_data = train_data) %>%
@@ -973,7 +1075,7 @@ Total split
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", property_range = 49:51)
+                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 19:51)
 ```
 
 Source-based split
@@ -1044,9 +1146,11 @@ Cornell only Predictions (focused on pH)
 
 Zero-variance predictors don’t contribute to PLS components since they hold no information.
 
-	•	Removing them has a marginal effect because PLSR naturally assigns zero weight to irrelevant predictors.
+```         
+•   Removing them has a marginal effect because PLSR naturally assigns zero weight to irrelevant predictors.
 
-	•	Edge case: If your dataset is very small, leaving zero-variance predictors might slightly affect component selection due to noise in variance calculations.
+•   Edge case: If your dataset is very small, leaving zero-variance predictors might slightly affect component selection due to noise in variance calculations.
+```
 
 Total split
 
@@ -1055,7 +1159,7 @@ Total split
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_Lab")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", property_range = 49:51)
+                   use_source = FALSE, tuning_goal = "rmsep") #, property_range = 49:51)
 ```
 
 Source-based split
@@ -1071,6 +1175,24 @@ run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "pls", identifie
 Cornell only Predictions (focused on pH)
 
 \*\* don't make a difference
+
+#### PCA Components as features
+
+```{r}
+
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_PCAfeat")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =20) #, property_range = 2:5) 
+```
+
+\*\* Sparse Generalized Canonical Correlation Analysis (SGCCA) algorithm used in pls() modeling failed to find a stable solution within the allowed iterations.
+
+```{r}
+
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_PCAfeat_variance")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.95) #, property_range = 50:52) 
+```
 
 #### Tune to minimize RMSEP - NIR
 
@@ -1091,7 +1213,7 @@ Source-based split - NIR
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_NIR_sourcesplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep")
+                   use_source = TRUE, tuning_goal = "rmsep")#, property_range = 3:4)
 ```
 
 Cornell only Predictions - NIR
@@ -1101,7 +1223,7 @@ Cornell only Predictions - NIR
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_NIR_CornellOnlysplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep")
+                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", property_range = 59:60)
 ```
 
 #### Tune to minimize RMSEP - MIR + NIR
@@ -1145,7 +1267,7 @@ Total split - MIR + NIR
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_totsplit_Lab")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", property_range = 49:51)
+                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
 ```
 
 Source-based split - MIR + NIR
@@ -1170,7 +1292,7 @@ Cornell only Predictions - MIR + NIR
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", property_range = 49:51)
+                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
 ```
 
 ```{r}
@@ -1210,7 +1332,7 @@ run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
 
 ```
 
-#### Lab Covariate - MIR 
+#### Lab Covariate - MIR
 
 ```{r}
 
@@ -1226,7 +1348,7 @@ run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier
                    use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
 ```
 
-#### No Zero Variance - MIR 
+#### No Zero Variance - MIR
 
 -   Identifies **columns (wavenumbers) where all values are identical** (e.g., every row has 0.5 at a certain wavenumber). These predictors provide **no information** because their standard deviation is **zero**.
 
@@ -1234,7 +1356,7 @@ run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_zv")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
+                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 59:63)
 ```
 
 ```{r}
@@ -1252,7 +1374,7 @@ run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
 
 ```
 
-#### Lab Covariate & No Zero Variance- MIR 
+#### Lab Covariate & No Zero Variance- MIR
 
 ```{r}
 
@@ -1266,6 +1388,26 @@ run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier
 identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_lab")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,
                    use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
+```
+
+#### PCA Components as features
+
+Number of components
+
+```{r}
+
+identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_PCAfeat")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =15) #, property_range = 58:65) 
+```
+
+Captured variance
+
+```{r}
+
+identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_PCAfeat")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.95) #, property_range = 39:41 ) #property_range = 49:51,
 ```
 
 #### Tune to minimize RMSEP - NIR
@@ -1291,7 +1433,7 @@ run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
 
 ```
 
-#### Lab Covariate - NIR 
+#### Lab Covariate - NIR
 
 ```{r}
 
@@ -1307,7 +1449,7 @@ run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier
                    use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
 ```
 
-#### No Zero Variance - NIR 
+#### No Zero Variance - NIR
 
 ```{r}
 
@@ -1331,7 +1473,7 @@ run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
 
 ```
 
-#### Lab Covariate & No Zero Variance - NIR 
+#### Lab Covariate & No Zero Variance - NIR
 
 ```{r}
 
@@ -1488,6 +1630,8 @@ run_all_properties(
 
 ```{r}
 
+identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit")
+
 run_all_properties(
   slprptr = slprptr,
   df1 = df1,
@@ -1495,14 +1639,18 @@ run_all_properties(
   model_type = "brnn",
   use_source = FALSE,
   tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit"), 
-  property_range = 2:length(slprptr),
-  include_pca = TRUE
+  property_range = 52:56, #length(slprptr),
+  include_pca = TRUE,
+  identifier,
+  num_pca_comp = 20
+  #variance_threshold = 0.95
 )
 ```
 
 ```{r}
 
+identifier <- initialize_workspace("BRNN_RMSEP_MIR_sourcesplit")
+  
 run_all_properties(
   slprptr = slprptr,
   df1 = df1,
@@ -1510,15 +1658,17 @@ run_all_properties(
   model_type = "brnn",
   use_source = TRUE,
   tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_sourcesplit"), 
-  property_range = 2:length(slprptr),
-  include_pca = TRUE
+  property_range = 52:56, #length(slprptr),
+  include_pca = TRUE,
+  identifier,
+  variance_threshold = 0.95
 )
 ```
 
-#### Lab Covariate - MIR 
+#### Lab Covariate - MIR
 
 ```{r}
+identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit_lab")
 
 run_all_properties(
   slprptr = slprptr,
@@ -1527,13 +1677,13 @@ run_all_properties(
   model_type = "brnn",
   use_source = FALSE,
   tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit_lab"), 
   property_range = 2:length(slprptr),
   include_pca = TRUE
 )
 ```
 
 ```{r}
+identifier <- initialize_workspace("BRNN_RMSEP_MIR_sourcesplit_lab")
 
 run_all_properties(
   slprptr = slprptr,
@@ -1542,8 +1692,8 @@ run_all_properties(
   model_type = "brnn",
   use_source = TRUE,
   tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_sourcesplit_lab"), 
   property_range = 2:length(slprptr),
+  identifier,
   include_pca = TRUE
 )
 ```
@@ -1551,6 +1701,7 @@ run_all_properties(
 #### Tune to minimize RMSEP - MIR + NIR
 
 ```{r}
+identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_totsplit")
 
 run_all_properties(
   slprptr = slprptr,
@@ -1559,13 +1710,15 @@ run_all_properties(
   model_type = "brnn",
   use_source = FALSE,
   tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_totsplit"), 
   property_range = 2:length(slprptr),
+  identifier,
   include_pca = TRUE
 )
 ```
 
 ```{r}
+
+identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_sourcesplit")
 
 run_all_properties(
   slprptr = slprptr,
@@ -1574,15 +1727,17 @@ run_all_properties(
   model_type = "brnn",
   use_source = TRUE,
   tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_sourcesplit"), 
   property_range = 2:length(slprptr),
+  identifier,
   include_pca = TRUE
 )
 ```
 
-#### Lab Covariate - MIR 
+#### Lab Covariate - MIR
 
 ```{r}
+
+identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_totsplit_lab")
 
 run_all_properties(
   slprptr = slprptr,
@@ -1591,13 +1746,15 @@ run_all_properties(
   model_type = "brnn",
   use_source = FALSE,
   tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_totsplit_lab"), 
   property_range = 2:length(slprptr),
+  identifier,
   include_pca = TRUE
 )
 ```
 
 ```{r}
+
+identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_sourcesplit_lab")
 
 run_all_properties(
   slprptr = slprptr,
@@ -1606,8 +1763,8 @@ run_all_properties(
   model_type = "brnn",
   use_source = TRUE,
   tuning_goal = "rmsep",
-  identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_sourcesplit_lab"), 
   property_range = 2:length(slprptr),
+  identifier,
   include_pca = TRUE
 )
 ```

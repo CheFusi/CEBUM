@@ -15,16 +15,24 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r, include=FALSE}
 
 # Define a list of required packages
-required_packages <- c("writexl","randomForest", "caret", "pls", "data.table", "ithir", 
+required_packages <- c("writexl","readxl","randomForest", "caret", "pls", "data.table", "ithir", 
                        "dplyr", "tidyr", "prospectr", "globals", "stringr", 
                        "ggplot2", "here", "tidymodels", "parsnip", "plsmod", 
-                       "mixOmics", "yardstick", "purrr", "tibble","ranger","VIM","shiny","FNN","lightgbm", "xgboost", "dials", "tune", "brnn")
+                       "mixOmics", "yardstick", "purrr", "furrr", "tibble","ranger","VIM","shiny","FNN","lightgbm", "xgboost", "dials", "tune", "brnn", "recipes")
 
 #VIM for KNN imputation
 # Load all required packages quietly without outputting any list of packages
 suppressPackageStartupMessages(
   invisible(lapply(required_packages, library, character.only = TRUE))
 )
+
+# Ensure dplyr functions are prioritized
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+conflicted::conflicts_prefer(purrr::map)
+conflicted::conflicts_prefer(tune::tune)
+
+plan(multisession)
 ```
 
 ## Load reference data
@@ -34,7 +42,6 @@ suppressPackageStartupMessages(
 # treated spectra
 spec_trt <- readRDS("spec_trt_MIR.RDS")
 spec_trt_MIR_lab <- readRDS("spec_trt_MIR_lab.RDS")
-
 spec_trt_NIR <- readRDS("/Users/soliverchefusi/Library/CloudStorage/OneDrive-Personal/R/ICRAF&Lehmann/ICRAF_IR/ICRAF_IR_R_Project/ICRAF_IR/CEBUM/CEBUM_NIR/CEBUM_NIR/spec_trt_NIR.RDS")
 spec_trt_NIR_lab <- readRDS("/Users/soliverchefusi/Library/CloudStorage/OneDrive-Personal/R/ICRAF&Lehmann/ICRAF_IR/ICRAF_IR_R_Project/ICRAF_IR/CEBUM/CEBUM_NIR/CEBUM_NIR/spec_trt_NIR_lab.RDS")
 
@@ -61,25 +68,25 @@ colnames(pred)<-"SSN"
  
 ```
 
-## PLSR ( & RF) Base model
+## PLSR, RF, GBDT, BRNN Model Workflow
 
-1.  definine a 'base' model based on minimizing RMSEP
+Models based on minimizing RMSEP (objective function)
 
 High-Level Structure:
 
 ```         
 1.  Preprocessing
 
-2.  Setting up models (PLS and Random Forest)
+2.  Setting up models 
 
 3.  Running models (map() over models to fit them)
 
 4.  Calculating metrics (for each model)
 
 5.  Plotting results (for each model)
-
-6.  Comparing the models (optional step for comparing PLS vs Random Forest)
 ```
+
+### Initializing Repository for Outputs
 
 ```{r}
 
@@ -92,6 +99,11 @@ initialize_workspace <- function(identifier) {
   
   return(identifier)  # Pass the identifier for later use
 }
+```
+
+### Selecting Property to then iterate over
+
+```{r}
 
 # slprptr: list of properties; .x: index of property in slprptr
 select_property_data <- function(slprptr, .x, df1, spec_trt) {
@@ -112,8 +124,6 @@ select_property_data <- function(slprptr, .x, df1, spec_trt) {
   }
   
   # Filter and preprocess data, including removing outliers for the selected property
-
-    
     df.sel <- df.f %>%
     dplyr::select(dplyr::all_of(cols_to_select)) %>%
     inner_join(spec_trt, by = "SSN") %>%   # Combine predictor and response variables into one df
@@ -129,600 +139,768 @@ select_property_data <- function(slprptr, .x, df1, spec_trt) {
   
   return(list(df.f = df.f, df.sel = df.sel))
 }
+```
 
-# Split data into calibration (training) and validation (test) sets
-# Allows splitting based on a specific Source if source_name is specified
-split_data <- function(df.sel, use_source = FALSE, source_name = NULL) {
-  # If a specific source_name is provided, filter data for that source
-  
+### Defining Training/Test Split
+
+### Bootstrapped Training/Test Split
+
+```{r}
+
+generate_bootstrap_splits <- function(df.sel, num_bootstrap, use_source = FALSE, source_name = NULL) {
+  set.seed(123)
+
+  # If a specific lab is selected, filter data
   if (!is.null(source_name)) {
     df.sel <- df.sel %>% filter(Source == source_name)
   }
 
-  if (use_source) {
-    set.seed(123) 
-    # Split ensuring Source is represented in both subsets
-    trainIndex <- createDataPartition(df.sel$Source, p = 0.7, list = FALSE)
-  } else {
-    set.seed(123) 
-    # Split without considering Source
-    trainIndex <- sample(seq_len(nrow(df.sel)), size = 0.7 * nrow(df.sel))
+  # Ensure we have enough samples
+    # If there aren't enough samples, return NULL instead of stopping
+  if (nrow(df.sel) < 20) {
+    message("Skipping property due to insufficient data after filtering.")
+    return(NULL)
   }
 
-  # Remove Source column
-    df.sel <- df.sel %>% dplyr::select(-Source)
-  
-  cal_ids <- rownames(df.sel)[trainIndex]
-  val_ids <- rownames(df.sel)[-trainIndex]
-    
-    # Filter and assign rownames directly
-  cal_df <- df.sel %>%
-    filter(rownames(.) %in% cal_ids) %>%
-    arrange(rownames(.)) 
-  
-  val_df <- df.sel %>%
-    filter(rownames(.) %in% val_ids) %>%
-    arrange(rownames(.))
+  # Generate bootstrap resamples with or without stratification
+  if (use_source) {
+    boot_splits <- bootstraps(df.sel, times = num_bootstrap, strata = "Source")
+  } else {
+    boot_splits <- bootstraps(df.sel, times = num_bootstrap)
+  }
 
-  # Save objects in the global environment
-assign("cal_df_global", cal_df, envir = .GlobalEnv)
-assign("val_df_global", val_df, envir = .GlobalEnv)
-
-  return(list(cal_df = cal_df, val_df = val_df))
+  return(boot_splits)
 }
 
-prepare_model_data <- function(cal_df, val_df, slprptr, .x) {
-  if (nrow(cal_df) <= 10 || nrow(val_df) <= 10) {
-    warning("Insufficient rows in cal_df or val_df. Returning NA placeholders.")
-    train_data <- cal_df
-    test_data <- val_df
-    train_data[, ] <- NA
-    test_data[, ] <- NA
-  } else {
-    train_data <- cal_df
-    test_data <- val_df
-    rownames(train_data) <- train_data$SSN  # Set SSN as rownames but keep the column
-    rownames(test_data) <- test_data$SSN
-  }
+# Function to split bootstrap resample into train/test
+split_bootstrap_sample <- function(boot_sample) {
+  train_data <- analysis(boot_sample)
+  test_data <- assessment(boot_sample)
   
-  # Save rownames of training and test data for debugging
-  debug_rows <- tibble(
-    Property = slprptr[.x],
-    Dataset = c(rep("Training", nrow(train_data)), rep("Testing", nrow(test_data))),
-    SSN = c(rownames(train_data), rownames(test_data))
-  )
-  
-  # Save debugging dataframe globally to inspect later
-  if (!exists("debug_row_summary")) {
-    assign("debug_row_summary", debug_rows, envir = .GlobalEnv)
-  } else {
-    debug_row_summary <<- bind_rows(debug_row_summary, debug_rows)
-  }
+  #Remove Source column before model training
+  train_data <- train_data %>% dplyr::select(-Source)
+  test_data <- test_data %>% dplyr::select(-Source)
   
   return(list(train_data = train_data, test_data = test_data))
 }
+```
 
-# Create a recipe for data preprocessing, with optional custom steps
-preprocess_data <- function(train_data, test_data, slprptr, p, recipe_steps = NULL,include_zv = FALSE,
-                            include_pca = FALSE, 
-                            num_pca_comp = NULL, 
-                            variance_threshold = NULL) {
-  # Check if train/test data is all NA
-  if (all(is.na(train_data)) || all(is.na(test_data))) {
-    warning("Preprocessing skipped due to all NA in train/test data.")
-    return(list(
-      recipe = NULL,
-      train_data = data.frame(),  # Return an empty data frame as a placeholder
-      test_data = data.frame(),
-      n_comp_pca = NA
-    ))
-  }
-  
-  formula <- as.formula(paste(slprptr[p], "~ ."))  # Define formula for model
-  
-  # Define base recipe with ID role (column) for SSN
-  recipe_base <- recipe(formula, data = train_data) %>%
-    update_role(SSN, new_role = "ID")  # Designate SSN column as an identifier
-  
-    # Conditionally add step_zv() only if include_zv is TRUE
-  if (include_zv) {
-    recipe_base <- recipe_base %>% step_zv()%>%
-step_nzv()
-  }
-  
-  # Conditionally add PCA only if include_pca is TRUE
-  
-    # Check available numeric predictors **before** applying PCA
+**NOTE: prepare_model_data and preprocess_data functions are a bit redundant ... consider combining one you solidfy script**
 
-  # Handle PCA selection
-  n_comp_pca <- NA  # Default to NA if PCA is not applied
-  
-  if (include_pca) {
-    if (!is.null(num_pca_comp)) {
-      
-      # Ensure num_pca_comp does not exceed the number of samples - 1
-      # num_pca_comp_set <- min(num_pca_comp, ncol(train_data), nrow(train_data) - 1)
-      
-    num_pca_comp_set <- min(
-    num_pca_comp, 
-    ncol(train_data), 
-    nrow(train_data) - 1,  
-    max(10, floor(nrow(train_data) * 0.2))
-  )  
+```{r}
 
-  # Fallback to 5 components if the matrix is singular
-  if (num_pca_comp_set > (nrow(train_data) - 1) || num_pca_comp_set > (ncol(train_data) - 1)) {
-    message("Warning: num_pca_comp (", num_pca_comp, ") too high. Using fallback value of 5 components.")
-    num_pca_comp_set <- 5
-  }
-      
-
-    recipe_base <- recipe_base %>%
-      step_pca(all_numeric_predictors(), num_comp = num_pca_comp_set)
-     n_comp_pca <- num_pca_comp_set  # Store the manually set component count
-
-         # Extract actual number of components chosen dynamically
-    prepped_recipe <- prep(recipe_base, training = train_data, retain = TRUE)
-    
-    # Extract the actual number of PCA components chosen based on variance
-    n_comp_pca_test <- prepped_recipe$steps[[1]]$num_comp 
-    
-    # Debugging messages to check values
-View(prepped_recipe)
-message(paste("Final num_pca_comp_set:", n_comp_pca_test))
-     
-     
-  } else if (!is.null(variance_threshold)) {
-    recipe_base_pca_variance <- recipe_base %>%
-      step_pca(all_numeric_predictors(), threshold = variance_threshold)
-    
-    # Extract actual number of components chosen dynamically
-    prepped_recipe <- prep(recipe_base_pca_variance, training = train_data, retain = TRUE)
-    
-    # Extract the actual number of PCA components chosen based on variance
-    n_comp_pca_variance <- prepped_recipe$steps[[1]]$num_comp  # Extracts the selected num_comp
-
-    # Ensure the number of PCA components does not exceed nrow(train_data) - 1
-    #num_pca_comp_set <- min(n_comp_pca_variance, ncol(train_data), nrow(train_data) - 1)
-numeric_cols <- train_data %>%
-  dplyr::select(where(is.numeric)) %>%
-  ncol()
-
-num_pca_comp_set <- max(
-  min(n_comp_pca_variance, numeric_cols, nrow(train_data) - 1, ncol(train_data) - 1),  
-  max(min(10, floor(nrow(train_data) * 0.2)), 2)  # Dynamic lower bound  #
-)
-
-    # Apply PCA step with the selected number of components
-    recipe_base <- recipe_base %>%
-      step_pca(all_numeric_predictors(), num_comp = num_pca_comp_set)
-
-    # Store the number of components for later use
-    n_comp_pca <- num_pca_comp_set
-    
-  } else {
-    warning("PCA was enabled but neither num_pca_comp nor variance_threshold was provided. PCA will not be applied.")
-  }
-  }
-  
-  # Ensure valid PCA selection
-  if (!is.na(n_comp_pca) && n_comp_pca < 2) {
-    warning(paste("Skipping PCA for", slprptr[p], "- not enough valid components after preprocessing."))
-    return(list(
-      recipe = NULL,
-      train_data = train_data,
-      test_data = test_data,
-      n_comp_pca = NA
-    ))
-  }
-  
-  message("DEBUG: Inside preprocess_data()")
-message(paste("DEBUG: include_pca =", include_pca))
-message(paste("DEBUG: num_pca_comp =", num_pca_comp))
-#message(paste("DEBUG: variance_threshold =", variance_threshold))
-message(paste("DEBUG: Final n_comp_pca =", n_comp_pca))
-message(paste("DEBUG: Final n_comp_pca_set =", num_pca_comp_set))
-
-if (is.null(n_comp_pca) || is.na(n_comp_pca)) {
-    stop("ERROR: n_comp_pca is NULL in preprocess_data()!")
-}
-  
-  # Apply additional preprocessing steps as needed
-  if (!is.null(recipe_steps)) {
-    for (step in recipe_steps) {
-      recipe_base <- recipe_base %>% step
-    }
-  }
-  
-  return(list(recipe = recipe_base, train_data = train_data, test_data = test_data, n_comp_pca = n_comp_pca))
-}
-
-# Set up PLS or Random Forest model specification, including tuning parameters
-setup_model <- function(model_type, train_data = NULL, response_var = NULL) {
-  if (model_type == "pls") {
-    # Configure a PLS model specification
-    model_spec <- parsnip::pls() %>%
-      set_mode("regression") %>%
-      set_engine("mixOmics") %>%
-      set_args(num_comp = tune())
-    mtry_range <- NULL
-  } else if (model_type == "rf") {
-    # Configure a Random Forest model with tuning for mtry and min_n
-    if (is.null(train_data)) stop("train_data must be provided for Random Forest.")
-    if (is.null(response_var)) stop("response_var must be specified for Random Forest.")
-    
-    # Remove SSN and response columns to get only predictor columns
-    predictors_only <- train_data %>%
-      dplyr::select(-SSN, -all_of(response_var))
-        # Check if predictors are sufficient
-    if (ncol(predictors_only) < 2) stop("Random Forest requires at least 2 predictor variables.")
-    
-    
-    # Finalize mtry_range
-    # mtry_range <- dials::finalize(dials::mtry(), predictors_only) # predictors_only is used to set the max value for the mtry range - so here mtry ranges up to the total number of predictors (e.g. number of wavenumbers).
-    mtry_range <- dials::mtry(range = c(2, round(sqrt(ncol(predictors_only)))))
-    
-    if (is.null(mtry_range)) stop("Failed to initialize mtry_range in setup_model(). Check predictor columns in train_data.")
-    
-    model_spec <- parsnip::rand_forest(mtry = tune(), min_n = tune()) %>%
-      set_mode("regression") %>%
-      set_engine("ranger")
-  } else if (model_type == "gbdt") {
-    # Gradient-Boosted Decision Tree setup
-    predictors_only <- train_data %>%
-      dplyr::select(-SSN, -all_of(response_var))
-    model_spec <- parsnip::boost_tree(
-      trees = tune(),  # Number of trees to tune
-      tree_depth = tune(),  # Depth of each tree
-      learn_rate = tune(),  # Learning rate
-      loss_reduction = tune(),  # Minimum gain for split
-      min_n = tune(),  # Tune minimal node size
-      #sample_size = tune(),  # Tune row sampling
-      mtry = tune()  # Tune predictor sampling
-    ) %>%
-      set_mode("regression") %>%
-      set_engine("xgboost")
-                 #early_stopping_rounds = 10)  #
-    mtry_range <- NULL  # Not applicable for GBDT
-  } else if (model_type == "brnn") {
-    model_spec <- parsnip::mlp(hidden_units = tune(), penalty = tune()) %>%
-      set_mode("regression") %>%
-      set_engine("nnet")
-    mtry_range <- NULL
-  } else {
-    stop("Unsupported model type: ", model_type)
-  }
-  return(list(model_spec = model_spec, mtry_range = mtry_range))
-}
-
-calculate_metrics <- function(data, predictions, data_type, slprptr, .x, best_params, model_type, test_data) {
-  response_var <- slprptr[.x]  # Define response variable
-
-  # Check if response variable is present and .pred column exists in predictions
-  if (!response_var %in% colnames(data) || !".pred" %in% colnames(predictions)) {
-    message(paste("Skipping metrics calculation due to missing columns."))
-    return(tibble(Property = response_var, Data_Type = data_type, Model = model_type, R2 = NA, RMSE = NA))
-  }
-
-  # Safe computation function with error handling for each metric
-  safe_compute <- function(expression) {
-    tryCatch(eval(expression), error = function(e) NA)
-  }
-
-  # Calculate performance metrics
-  r2_value <- safe_compute(rsq_vec(truth = data[[response_var]], estimate = predictions$.pred))
-  rmse_value <- safe_compute(rmse_vec(truth = data[[response_var]], estimate = predictions$.pred))
-  bias_value <- safe_compute(mean(predictions$.pred - data[[response_var]], na.rm = TRUE) / mean(data[[response_var]], na.rm = TRUE))
-
-  # Calculate the range of the response variable from the test_data and RMSEP/range
-  response_range <- safe_compute(max(test_data[[response_var]], na.rm = TRUE) - min(test_data[[response_var]], na.rm = TRUE))
-  rmse_range_ratio <- if (!is.na(response_range) && response_range > 0) rmse_value / (response_range / 10) else NA
-
-  metrics_tibble <- tibble(
-    Property = response_var,
-    Data_Type = data_type,
-    Model = model_type,
-    Comps = if (model_type == "pls") best_params$num_comp else NA,
-    #mtry = if (model_type == "rf") best_params$mtry else NA,
-    #min_n = if (model_type == "rf") best_params$min_n else NA,
-    mtry = if (model_type %in% c("rf", "gbdt")) best_params$mtry else NA,  
-    min_n = if (model_type %in% c("rf", "gbdt")) best_params$min_n else NA,  
-    N = nrow(data),
-    R2 = r2_value,
-    RMSE = rmse_value,
-    RMSEP_range_ratio = rmse_range_ratio,
-    bias = bias_value
-    #n_comp_pca = if (include_pca) n_comp_pca else NA  # Only assign if PCA was applied
-  )
-
-  return(metrics_tibble)
-}
-
-# Define properties for core and related metrics
-get_property_groups <- function() {
-  core_properties <- c(
-    "Temp.", "pH", "EC_uS", "Ash_avg", "exchg_Ca_mmol_kg", 
-    "exchg_K_mmol_kg", "exchg_Mg_mmol_kg", "exchg_Na_mmol_kg", "exchg_P_mmol_kg", 
-    "Ca_mg_kg", "K_mg_kg", "Mg_mg_kg", "C_tot_avg", "N_tot_avg",
-    "C_org_wt", "H_tot_wt", "O_ult", "P_avg_mg_kg", "Fe_avg_mg_kg", "Zn_avg_mg_kg", 
-    "Cu_avg_mg_kg", "Ni_avg_mg_kg", "As_avg_mg_kg", "Cd_avg_mg_kg"
-  )
-  
-  related_properties <- c(
-    "Naphthalin_mg_kg", "X2_Methylnaphthalin", "X1_Methylnaphthalin", "Sum_Naphthaline", 
-    "Acenaphthylen", "Acenaphthen", "Fluoren", "Phenanthren", "Anthracen", 
-    "Fluoranthen", "Pyren", "Chrysen", "Benzo_a_anthracen", 
-    "Benzo_b_plus_k_fluoranthen", "Benzo_a_pyren", "Dibenzo_a_h_anthracen", 
-    "Indeno_c_d_pyren", "Benzo_g_h_i_perylen", "Sum_PAH_defined_EPA_mg_kg", 
-    "Bulk.Density_mg_m3", "C_tot_to_N_wt", "O_less_Al_Si_Fe_to_C", "O_less_Al_Si_Fe_Ca_to_C","O_less_Al_Si_Fe_C_inorg_to_C", "O_less_C_inorg_to_C", "C_org_to_N_wt", 
-    "C_tot_to_N_molar", "Htot_to_C_tot_molar", "Oult_to_C_tot_molar", 
-    "Htot_to_C_org_molar", "Oult_to_C_org_molar", "O_less_Al_Si_Fe_to_C_org_molar", 
-    "O_less_Al_Si_Fe_Ca_to_C_org_molar", "O_less_Al_Si_Fe_C_inorg__to_C_org_molar", 
-    "O_less_C_inorg_to_C_org_molar"
-  )
-  
-  return(list(core_properties = core_properties, related_properties = related_properties))
-}
-
-filter_metrics_by_group <- function(all_metrics, property_groups) {
-  core_metrics <- all_metrics %>% filter(Property %in% property_groups$core_properties)
-  related_metrics <- all_metrics %>% filter(Property %in% property_groups$related_properties)
-  return(list(core_metrics = core_metrics, related_metrics = related_metrics))
-}
-
-
-# Function to plot measured vs. predicted values and save in the default directory
-plot_predictions <- function(val_plot_data, val_df, slprptr, .x, combined_metrics, model_type, identifier) {
-  # Check if the property exists in the validation plot data
-  if (!(slprptr[.x] %in% colnames(val_plot_data))) return(NULL)
-
-  # Extract metrics for validation
-  val_metrics <- combined_metrics %>% filter(Data_Type == "Validation", Model == model_type)
-  
-  # Add label text with components and R²
-  label_text <- paste("Comps:", val_metrics$Comps, "R²:", round(val_metrics$R2, 3))
-
-  # Generate the plot
-  # validation_plot <- ggplot(val_plot_data, aes_string(x = slprptr[.x], y = ".pred")) +
-  #   geom_point(color = "blue", size = 2) +
-  #   geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
-  #   labs(
-  #     title = paste("Measured vs Predicted for", slprptr[.x], "-", model_type),
-  #     x = paste("Measured", slprptr[.x]),
-  #     y = "Predicted"
-  #   ) +
-  #   theme_minimal() +
-  #   annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.5, label = label_text, size = 4)
-
-  # Save the plot
-  # ggsave(
-  #   filename = paste0("Plots_Validation_PLSR_MIR_", identifier, "/", slprptr[.x], "_", model_type, ".png"),
-  #   plot = validation_plot, width = 7, height = 7, dpi = 300
-  #)
-}
-
-# Plot R² values and differences for well-fitted properties based on model criteria
-plot_well_fitted_r2 <- function(all_metrics, identifier) {
-  all_r2_values <- all_metrics %>%
-    group_by(Property) %>%
-    reframe(
-      R2_cal = R2[Data_Type == "Calibration"],
-      R2_val = R2[Data_Type == "Validation"],
-      R2_diff = abs((R2_cal - R2_val) / R2_cal)
-    )
-  
-  well_fitted_properties <- all_r2_values %>%
-    filter(R2_diff <= 0.15, R2_cal > 0.6, R2_val > 0.6) %>%
-    pull(Property)
-  
-  plot_data <- all_metrics %>%
-    filter(Property %in% well_fitted_properties, Data_Type %in% c("Calibration", "Validation")) %>%
-    dplyr::select(Property, Data_Type, R2, N, RMSE, bias,RMSEP_range_ratio) %>%
-    dplyr::rename(Value = R2)
-  
-  well_fitted_plot <- ggplot(plot_data, aes(x = Property, y = Value, fill = Data_Type)) +
-    geom_bar(stat = "identity", position = "dodge") +
-    scale_fill_manual(values = c("Calibration" = "purple", "Validation" = "darkgreen")) +
-    theme_minimal() +
-    theme(
-      axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 8),
-      panel.grid = element_blank(),
-      panel.border = element_rect(color = "black", fill = NA)
-    ) +
-    labs(title = "R² Comparison for Well-Fitted Properties",
-         subtitle = "Purple: Calibration | Green: Validation",
-         y = "R² Value",
-         x = "Property") +
-    geom_text(
-      aes(label = ifelse(Data_Type == "Calibration", paste0("N:", N),
-                         paste0("N:", N, "\nRMSE%:\n", round(RMSEP_range_ratio, 2), "\nRel_Bias:\n", round(bias, 2)))),
-      position = position_dodge(width = 0.9), 
-      vjust = -0.5, size = 3
-    ) +
-    ylim(0, 1.35)  # Set y-axis limit to allow space for annotations
-  
-  print(well_fitted_plot)
-  
-  ggsave(filename = paste0("Plots_WellFitted_Properties_", identifier, "/well_fitted_properties_plot.png"), 
-         plot = well_fitted_plot, width = 10, height = 7, dpi = 300)
-}
-
-
-# Wrapper function to run analysis for each property in slprptr with specified model_type (no default)
-run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier, 
-                                use_source = FALSE, source_name = NULL, tuning_goal = "rmsep",
-                                property_range = 2:length(slprptr), include_zv = FALSE, include_pca = FALSE, num_pca_comp = NULL, variance_threshold = NULL) {
-  #all_metrics <<- tibble()  # Initialize global metrics storage
-  model_results <- list()  # Store model fits for later use
-  output_dir <- paste0("Plots_WellFitted_Properties_", identifier)  # Use existing directory
-
-  
-  # Validate the property_range parameter
-  if (any(property_range > length(slprptr) | property_range < 1)) {
-    stop("property_range contains indices outside the valid range of slprptr.")
-  }
-  
-  # Loop through each property in the specified range and collect metrics
-  all_metrics <- purrr::map_dfr(property_range, function(.x) {
-    message("Processing property: ", .x, " : ", slprptr[.x])
-    # Select and filter the property data
-    property_data <- select_property_data(slprptr, .x, df1, spec_trt)
-    df.f <- property_data$df.f
-    df.sel <- property_data$df.sel
-    
-    # Split the data into calibration (training) and validation (test) sets
-    split <- split_data(df.sel, use_source = use_source, source_name = source_name)
-    cal_df <- split$cal_df
-    val_df <- split$val_df
-    
-    # Skip if the calibration or validation datasets have insufficient rows
-    if (nrow(cal_df) <= 10 || nrow(val_df) <= 10) {
-      message(paste("Skipping property:", slprptr[.x], "due to insufficient data"))
-      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = NA, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
-    }
-    
-    # Prepare train/test data and preprocess (e.g., removing outliers)
-    data_prep <- prepare_model_data(cal_df, val_df, slprptr, .x)  # Converts calibration and validation datasets to train/test format
-    recipe_data <- preprocess_data(data_prep$train_data, data_prep$test_data, slprptr, .x, 
-      include_zv=include_zv, include_pca = include_pca,  num_pca_comp = num_pca_comp, variance_threshold = variance_threshold)  # Handles preprocessing steps
-    
-    #Ensure train_data and test_data are updated after additional step e.g. step_pca
-    train_data <- recipe_data$train_data
-    test_data <- recipe_data$test_data
-    
-    n_comp_pca <- recipe_data$n_comp_pca 
-    message(paste("DEBUG: Extracted n_comp_pca from preprocess_data():", n_comp_pca))
-    
-    # Ensure train/test data is not empty after preprocessing
-    if (nrow(recipe_data$train_data) == 0 || nrow(recipe_data$test_data) == 0) {
-      message(paste("Skipping property:", slprptr[.x], "due to empty train/test data after preprocessing."))
-      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = NA, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
-    }
-    
-    # Step 3: Skip properties with insufficient train/test data
-    if (nrow(data_prep$train_data) <= 10 || nrow(data_prep$test_data) <= 10) {
-      message(paste("Skipping property:", slprptr[.x], "due to insufficient train/test data"))
-      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = NA, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
-    }
-    
-    # Set up the model specification (PLS or RF) based on model_type
-    if (model_type == "pls") {
-      model_spec_list <- setup_model(model_type, train_data = data_prep$train_data)  # Set up PLS model
-    } else if (model_type == "rf") {
-      model_spec_list <- setup_model(model_type, train_data = data_prep$train_data, response_var = slprptr[.x])  # Set up RF model
-    } else if (model_type == "gbdt") {
-      model_spec_list <- setup_model(model_type, train_data = data_prep$train_data)  # Set up GBDT model
-    } else if (model_type == "brnn") {  # 🔥 Fix: Ensure BRNN is handled
-  model_spec_list <- setup_model(model_type, train_data = data_prep$train_data)  # Set up BRNN model
-  } else {
-      stop(paste("Unsupported model type:", model_type))  # Error for unsupported models
-    }
-    
-    
-    # Fit the model using the specified tuning goal (e.g., RMSEP) and handle errors gracefully
-    
-    message(paste("DEBUG: Passing n_comp_pca to fit_model():", n_comp_pca))
-
-  
-    model_fit <- tryCatch(
-      {
-        fit_model(
-          model_spec_list, 
-          train_data = recipe_data$train_data, 
-          test_data = recipe_data$test_data, 
-          recipe = recipe_data$recipe, 
-          model_type = model_type, 
-          tuning_goal = tuning_goal,
-          property_name = slprptr[.x],
-          include_zv = include_zv,
-          include_pca = include_pca,
-          variance_threshold = variance_threshold,
-          num_pca_comp = num_pca_comp,
-          n_comp_pca = n_comp_pca 
-        )
-      },
-      error = function(e) {
-        # Log detailed debugging info
-        warning(paste(
-          "Error with property:", slprptr[.x], "\n",
-          "Training data dimensions:", dim(recipe_data$train_data), "\n",
-          "Test data dimensions:", dim(recipe_data$test_data), "\n",
-          "Error message:", e$message
-        ))
-        return(tibble(Property = slprptr[.x], Data_Type = "Error", Model = NA, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
-      }
-    )
-    
-    # Handle skipped properties due to model fitting issues
-    if ("Data_Type" %in% colnames(model_fit) && model_fit$Data_Type[1] == "Skipped") {
-      return(model_fit)
-    }
-    
-    # Generate predictions for calibration and validation datasets
-    cal_predictions <- predict(model_fit$model, new_data = recipe_data$train_data)
-    val_predictions <- predict(model_fit$model, new_data = recipe_data$test_data)
-    
-    # Calculate performance metrics (R², RMSE, Bias, etc.) for both datasets
-    cal_metrics <- calculate_metrics(
-      data = recipe_data$train_data, 
-      predictions = cal_predictions, 
-      data_type = "Calibration", 
-      slprptr = slprptr, 
-      .x = .x, 
-      best_params = model_fit$best_params, 
-      model_type = model_type, 
-      test_data = recipe_data$test_data
-    )
-    val_metrics <- calculate_metrics(
-      data = recipe_data$test_data, 
-      predictions = val_predictions, 
-      data_type = "Validation", 
-      slprptr = slprptr, 
-      .x = .x, 
-      best_params = model_fit$best_params, 
-      model_type = model_type, 
-      test_data = recipe_data$test_data
-    )
-    
-    # Combine metrics for calibration and validation
-    combined_metrics <- bind_rows(cal_metrics, val_metrics)
-    
-    # Plot predictions (commented out for now; enable as needed)
-    # plot_predictions(
-    #   val_plot_data = recipe_data$test_data %>% dplyr::select(slprptr[.x]) %>% bind_cols(val_predictions),
-    #   val_df = val_df,
-    #   slprptr = slprptr,
-    #   p = .x,
-    #   combined_metrics = combined_metrics,
-    #   model_type = model_type,
-    #   identifier = identifier
-    # )
-
-    return(combined_metrics)
+prepare_model_data <- function(boot_data, slprptr, .x) {
+  # Map over all bootstrap splits to prepare train/test data for the specific property
+  #processed_splits <- map(boot_data, function(split) {
+  safe_map <- function(x, f) {
+  tryCatch(map(x, f), error = function(e) {
+    message("Error in map() inside prepare_model_data(): ", e$message)
+    stop(e)
   })
-  
-  # Retrieve property groups for filtering metrics
-  property_groups <- get_property_groups()
-  
-  # Filter metrics into core and related property groups
-  filtered_metrics <- filter_metrics_by_group(all_metrics, property_groups)
-  
-  # Save filtered metrics as separate tabs in an Excel file
-  output_data <- list(
-    "All Metrics" = all_metrics,
-    "Core Properties" = filtered_metrics$core_metrics,
-    "Related Properties" = filtered_metrics$related_metrics
-  )
-  output_file <- paste0("Plots_WellFitted_Properties_", identifier, "/all_metrics_", identifier, ".xlsx")
-  writexl::write_xlsx(output_data, path = output_file)
-  
+}
 
-  # Plot well-fitted R² results
-  plot_well_fitted_r2(all_metrics, identifier)
+processed_splits <- safe_map(boot_data, function(split) {
+  
+    train_data <- split$train_data # split refers to the index [[i]]
+    test_data <- split$test_data
+ 
+    # Ensure the property exists in the dataset
+    if (!slprptr[.x] %in% colnames(train_data)) {
+      return(list(train_data = NA, test_data = NA))  # Return NA instead of stopping or returning NULL
+    }
+# 
+#     # Select relevant columns: SSN + response variable
+#     selected_cols <- c("SSN", slprptr[.x])
+#     train_data <- train_data %>% dplyr::select(all_of(selected_cols)) %>% na.omit()
+#     test_data <- test_data %>% dplyr::select(all_of(selected_cols)) %>% na.omit()
+
+    # Ensure we have enough valid data after selection
+    if (nrow(train_data) <= 10 || nrow(test_data) <= 10) {
+      return(list(train_data = NA, test_data = NA))  # Maintain NA return instead of NULL
+    }
+    
+    # Append row number to SSN with three-digit formatting
+    train_data <- train_data %>%
+      dplyr::mutate(SSN = paste0(SSN, "_", sprintf("%03d", row_number())))
+    
+    test_data <- test_data %>%
+      dplyr::mutate(SSN = paste0(SSN, "_", sprintf("%03d", row_number())))
+
+
+    # Preserve SSN as rownames
+    rownames(train_data) <- train_data$SSN
+    rownames(test_data) <- test_data$SSN
+
+    return(list(train_data = train_data, test_data = test_data))
+  })
+
+  # # Remove invalid splits (but keep as NA, not NULL)
+  # valid_splits <- map(processed_splits, function(split) {
+  #   if (is.na(split$train_data) || is.na(split$test_data)) {
+  #     return(list(train_data = NA, test_data = NA))
+  #   } else {
+  #     return(split)
+  #   }
+  # })
+  
+  valid_splits <- compact(processed_splits)
+
+  return(valid_splits)  # Return list of processed train-test pairs, ensuring all outputs are NA-safe
 }
 ```
 
-## Base model 1
+### Prepping Model/ Defining Recipe
+
+```{r}
+
+preprocess_data <- function(valid_splits, slprptr, p, #recipe_steps = NULL
+                            include_zv = FALSE,
+                            include_pca = FALSE,
+                            #include_pls = FALSE,
+                            #include_rf = FALSE,
+                            num_pca_comp = NULL 
+                            #variance_threshold = NULL,
+                            #variance_threshold_pls = NULL,
+                            #forest_threshold = NULL) 
+                            ){
+
+    # Use safe_map() to prevent failures in mapping
+    safe_map <- function(x, f) {
+        tryCatch(map(x, f), error = function(e) {
+            message("Error in map() inside preprocess_data(): ", e$message)
+            stop(e)
+        })
+    }
+
+    processed_splits <- safe_map(valid_splits, function(split) {
+        
+        # Ensure train and test data exist
+        if (!"train_data" %in% names(split) || !"test_data" %in% names(split)) {
+            message("🚨 Warning: Missing train/test data in this split!")
+            return(NULL)  # Explicitly return NULL so we can track it
+        }
+        
+        train_data <- split$train_data
+        test_data <- split$test_data
+        
+
+        if (nrow(train_data) == 0 || nrow(test_data) == 0) {
+            warning("⚠️ Skipping split due to empty train/test data.")
+            return(NULL)
+        }
+
+
+        formula <- as.formula(paste(slprptr[p], "~ ."))
+        
+        recipe_base <- recipe(formula, data = train_data) %>%
+            update_role(SSN, new_role = "ID")
+        
+
+        if (include_zv) {
+            recipe_base <- recipe_base %>% step_zv() %>% step_nzv()
+        }
+
+        # # Initialize feature reduction variables
+        n_comp_pca <- NA_integer_
+        #n_comp_pls <- NA_integer_
+        #n_features_rf <- NA_integer_
+
+        # =========================== PCA ===========================
+        if (include_pca) {
+            if (!is.null(num_pca_comp)) {
+                num_pca_comp_set <- min(
+                    num_pca_comp,
+                    ncol(train_data),
+                    nrow(train_data) - 1,
+                    max(10, floor(nrow(train_data) * 0.2))
+                )
+                    # *** Check whether the result is length zero
+    if (length(num_pca_comp_set) == 0 || is.na(num_pca_comp_set)) {
+      message("Skipping property due to inability to determine a valid PCA component count.")
+      return(NULL)
+    }
+                if (num_pca_comp_set > (nrow(train_data) - 1) || num_pca_comp_set > (ncol(train_data) - 1)) {
+                    message("Warning: num_pca_comp (", num_pca_comp, ") too high. Using fallback value of 5 components.")
+                    num_pca_comp_set <- 5
+                }
+
+                recipe_base <- recipe_base %>%
+                    step_pca(all_numeric_predictors(), num_comp = num_pca_comp_set)
+                 # Wrap prep() in tryCatch so that if PCA fails, we return NULL
+    prepped_recipe <- tryCatch({
+      prep(recipe_base, training = train_data, retain = TRUE)
+    }, error = function(e) {
+      message("⚠️ PCA prep failed: ", e$message)
+      return(NULL)
+    })
+    
+    if (is.null(prepped_recipe)) {
+      message("Skipping property due to PCA failure.")
+      return(NULL)
+    }
+                n_comp_pca <- num_pca_comp_set
+            } else if (!is.null(variance_threshold)) {
+                recipe_base_pca_variance <- recipe_base %>%
+                    step_pca(all_numeric_predictors(), threshold = variance_threshold)
+
+                prepped_recipe <- prep(recipe_base_pca_variance, training = train_data, retain = TRUE)
+                n_comp_pca_variance <- prepped_recipe$steps[[1]]$num_comp
+
+                num_pca_comp_set <- max(
+                    min(n_comp_pca_variance, ncol(train_data), nrow(train_data) - 1),
+                    max(min(10, floor(nrow(train_data) * 0.2)), 2)
+                )
+
+                recipe_base <- recipe_base %>%
+                    step_pca(all_numeric_predictors(), num_comp = num_pca_comp_set)
+
+                n_comp_pca <- num_pca_comp_set
+            } else {
+                warning("PCA enabled but neither num_pca_comp nor variance_threshold provided. PCA not applied.")
+            }
+        }
+
+        if (include_pca && (length(n_comp_pca) == 0 || is.na(n_comp_pca))) {
+            stop("ERROR: n_comp_pca is NA despite PCA being enabled!")
+        }
+
+        # # =========================== PLS ===========================
+        # if (include_pls) {
+        #     if (!is.null(variance_threshold_pls)) {
+        #         recipe_base <- recipe_base %>%
+        #             step_pls(all_numeric_predictors(), outcome = slprptr[p])  
+        #     } else {
+        #         max_possible_comp <- min(ncol(train_data), nrow(train_data) - 1)
+        #         temp_recipe <- recipe_base %>%
+        #             step_pls(all_numeric_predictors(), outcome = slprptr[p], num_comp = max_possible_comp)
+        # 
+        #         prepped_temp <- prep(temp_recipe, training = train_data, retain = TRUE)
+        #         pls_results <- prepped_temp$steps[[1]]$res$Xvar  
+        #         cumulative_variance <- cumsum(pls_results) / sum(pls_results)
+        # 
+        #         n_comp_pls <- which(cumulative_variance >= variance_threshold_pls)[1]
+        # 
+        #         if (!is.na(n_comp_pls) && n_comp_pls < 2) {
+        #             warning("PLS variance threshold too high, using fallback of 2 components.")
+        #             n_comp_pls <- 2
+        #         }
+        # 
+        #         recipe_base <- recipe_base %>%
+        #             step_pls(all_numeric_predictors(), outcome = slprptr[p], num_comp = n_comp_pls)
+        #     }
+        # }
+        # 
+        # # =========================== Feature Selection (RF) ===========================
+        # if (include_rf && !is.null(forest_threshold)) {
+        #     message("Applying step_select_forests() with threshold: ", forest_threshold)
+        #     recipe_base <- recipe_base %>% step_select_forests(all_numeric_predictors(), threshold = forest_threshold)
+        # }
+
+        return(list(
+            recipe = recipe_base,
+            train_data = train_data,
+            test_data = test_data,
+            n_comp_pca = n_comp_pca
+            #n_comp_pls = n_comp_pls,
+            #n_features_rf = n_features_rf
+        ))
+    })
+
+
+    if (length(processed_splits) == 0 || all(map_lgl(processed_splits, is.null))) {
+        stop("🚨 ERROR: All processed_splits are NULL!")
+    }
+
+    return(processed_splits)
+}
+```
+
+### Tuning Models
+
+```{r}
+
+# # Set up PLS or Random Forest model specification, including tuning parameters
+# setup_model <- function(model_type, preprocessed_splits, response_var = NULL) {
+#   
+#     # Extract train_data from preprocessed_splits
+#   train_data_list <- preprocessed_splits$train_data
+#   
+# 
+#   # Iterate over all bootstrap splits to set up models
+#   models <- map(train_data_list, function(train_data) {
+# 
+#     # Skip if train_data is NA
+#     if (all(is.na(train_data))) {
+#       return(list(model_spec = NA, mtry_range = NA))
+#     }
+#   
+#   
+#   
+#   if (model_type == "pls") {
+#     # Configure a PLS model specification
+#     model_spec <- parsnip::pls() %>%
+#       set_mode("regression") %>%
+#       set_engine("mixOmics") %>%
+#       set_args(num_comp = tune())
+#     mtry_range <- NULL
+#   } else if (model_type == "rf") {
+#     # Configure a Random Forest model with tuning for mtry and min_n
+#     if (is.null(train_data)) stop("train_data must be provided for Random Forest.")
+#     if (is.null(response_var)) stop("response_var must be specified for Random Forest.")
+#     
+#     # Remove SSN and response columns to get only predictor columns
+#     predictors_only <- train_data %>%
+#       dplyr::select(-SSN, -all_of(response_var))
+#         # Check if predictors are sufficient
+#     if (ncol(predictors_only) < 2) stop("Random Forest requires at least 2 predictor variables.")
+#     
+#     
+#     # Finalize mtry_range
+#     # mtry_range <- dials::finalize(dials::mtry(), predictors_only) # predictors_only is used to set the max value for the mtry range - so here mtry ranges up to the total number of predictors (e.g. number of wavenumbers).
+#     mtry_range <- dials::mtry(range = c(2, round(sqrt(ncol(predictors_only)))))
+#     
+#     if (is.null(mtry_range)) stop("Failed to initialize mtry_range in setup_model(). Check predictor columns in train_data.")
+#     
+#     model_spec <- parsnip::rand_forest(mtry = tune(), min_n = tune()) %>%
+#       set_mode("regression") %>%
+#       set_engine("ranger")
+#   } else if (model_type == "gbdt") {
+#     # Gradient-Boosted Decision Tree setup
+#     predictors_only <- train_data %>%
+#       dplyr::select(-SSN, -all_of(response_var))
+#     model_spec <- parsnip::boost_tree(
+#       trees = tune(),  # Number of trees to tune
+#       tree_depth = tune(),  # Depth of each tree
+#       learn_rate = tune(),  # Learning rate
+#       loss_reduction = tune(),  # Minimum gain for split
+#       min_n = tune(),  # Tune minimal node size
+#       #sample_size = tune(),  # Tune row sampling
+#       mtry = tune()  # Tune predictor sampling
+#     ) %>%
+#       set_mode("regression") %>%
+#       set_engine("xgboost")
+#                  #early_stopping_rounds = 10)  #
+#     mtry_range <- NULL  # Not applicable for GBDT
+#   } else if (model_type == "brnn") {
+#     model_spec <- parsnip::mlp(hidden_units = tune(), penalty = tune()) %>%
+#       set_mode("regression") %>%
+#       set_engine("nnet")
+#     mtry_range <- NULL
+#   } else {
+#     stop("Unsupported model type: ", model_type)
+#   }
+#   return(list(model_spec = model_spec, mtry_range = mtry_range))
+#   })
+# 
+#   return(models)  # Return list of models, one per bootstrap split
+# }
+```
+
+```{r}
+
+# Set up PLS or Random Forest model specification, including tuning parameters
+setup_model <- function(model_type, preprocessed_splits, response_var = NULL) {
+  
+    train_data_list <- map(preprocessed_splits, "train_data")
+    test_data_list <- map(preprocessed_splits, "test_data")
+    
+    # Iterate over all bootstrap splits to set up models
+    models <- map(train_data_list, function(train_data) {
+
+        #  Check if train_data exists before proceeding
+        if (is.null(train_data)) {
+            warning("Skipping model setup due to NULL train_data.")
+            return(list(model_spec = NA, mtry_range = NA))
+        }
+
+        if (nrow(train_data) == 0 || ncol(train_data) == 0) {
+            warning("Skipping model setup due to empty train_data.")
+            return(list(model_spec = NA, mtry_range = NA))
+        }
+    
+        if (model_type == "pls") {
+            # Configure a PLS model specification
+            model_spec <- parsnip::pls() %>%
+                set_mode("regression") %>%
+                set_engine("mixOmics") %>%
+                set_args(num_comp = tune())
+            mtry_range <- NULL
+        } else if (model_type == "rf") {
+            # Configure a Random Forest model with tuning for mtry and min_n
+            if (is.null(response_var)) stop("response_var must be specified for Random Forest.")
+            
+            # Remove SSN and response columns to get only predictor columns
+            predictors_only <- train_data %>%
+                dplyr::select(-SSN, -all_of(response_var))
+            
+            # Check if predictors are sufficient
+            if (ncol(predictors_only) < 2) stop("Random Forest requires at least 2 predictor variables.")
+            
+            # Finalize mtry_range
+            mtry_range <- dials::mtry(range = c(2, round(sqrt(ncol(predictors_only)))))
+            if (is.null(mtry_range)) stop("Failed to initialize mtry_range in setup_model(). Check predictor columns in train_data.")
+            
+            model_spec <- parsnip::rand_forest(mtry = tune(), min_n = tune()) %>%
+                set_mode("regression") %>%
+                set_engine("ranger")
+        } else if (model_type == "gbdt") {
+            # Gradient-Boosted Decision Tree setup
+            predictors_only <- train_data %>%
+                dplyr::select(-SSN, -all_of(response_var))
+            
+            model_spec <- parsnip::boost_tree(
+                trees = tune(),  # Number of trees to tune
+                tree_depth = tune(),  # Depth of each tree
+                learn_rate = tune(),  # Learning rate
+                loss_reduction = tune(),  # Minimum gain for split
+                min_n = tune(),  # Tune minimal node size
+                mtry = tune()  # Tune predictor sampling
+            ) %>%
+                set_mode("regression") %>%
+                set_engine("xgboost")
+            mtry_range <- NULL  # Not applicable for GBDT
+        } else if (model_type == "brnn") {
+            model_spec <- parsnip::mlp(hidden_units = tune(), penalty = tune()) %>%
+                set_mode("regression") %>%
+                set_engine("nnet")
+            mtry_range <- NULL
+        } else {
+            stop("Unsupported model type: ", model_type)
+        }
+
+        return(list(model_spec = model_spec, mtry_range = mtry_range))
+    })
+
+    #return(models)  # Return list of models, one per bootstrap split
+    return(list(
+  models = models
+))
+  
+    
+}
+```
+
+### Defining/ Calculating Model Metrics
+
+```{r}
+
+calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) {
+
+  response_var <- slprptr[.x]  # Define response variable
+  
+    if (is.null(results_list) || length(results_list) == 0) {
+    message("⚠️ No valid results for ", response_var, " in ", data_type)
+    return(tibble(
+      Mean_R2 = NA, SD_R2 = NA, 
+      Mean_RMSE = NA, SD_RMSE = NA, 
+      Mean_Bias = NA, SD_Bias = NA, 
+      Property = response_var, 
+      Data_Type = data_type, 
+      Model = model_type
+    ))
+  }
+  
+   # Extract metrics for each bootstrap iteration
+  metrics_list <- map(results_list, function(result) {
+    
+    # Assign correct truth and prediction sets based on data_type
+    if (data_type == "Calibration") {
+      truth <- result$model$pre$mold$outcomes[[response_var]]  # Training data
+      predictions <- result$train_predictions
+    } else if (data_type == "Validation") {
+      truth <- result$test_truth[[response_var]]  # Use explicitly stored test values
+      predictions <- result$test_predictions
+    } else {
+      stop("Invalid data_type specified.")
+    }
+
+    # Ensure truth and predictions are aligned
+    if (length(truth) != nrow(predictions)) {
+      message("Skipping metric calculation: Length mismatch between truth and predictions")
+      return(tibble(R_sq = NA, RMSE = NA, bias = NA))
+    }
+
+    # Safe computation function with error handling
+    safe_compute <- function(expression) {
+      tryCatch(eval(expression), error = function(e) NA)
+    }
+
+    # Calculate performance metrics
+    r2_value <- safe_compute(rsq_vec(truth = truth, estimate = predictions$.pred))
+    rmse_value_plain <- safe_compute(rmse_vec(truth = truth, estimate = predictions$.pred))
+    bias_value <- safe_compute(mean(predictions$.pred - truth, na.rm = TRUE) / mean(truth, na.rm = TRUE) * 100)
+    
+      # Calculate the range of the response variable from the test_data and RMSEP/range
+  response_range <- safe_compute(max(truth, na.rm = TRUE) - min(truth, na.rm = TRUE))
+  
+  rmse_value <- if (!is.na(response_range) && response_range > 0) rmse_value_plain / (response_range / 10) else NA
+
+    return(tibble(R_sq = r2_value, RMSE = rmse_value, bias = bias_value))
+  })
+    # 🔍 **Remove NULL results before summarization**
+  metrics_list <- compact(metrics_list)  
+  # Combine results and calculate mean & standard deviation across bootstrap iterations
+  # Check if all iterations failed
+   # Convert list of tibbles into a single tibble
+  metrics_df <- bind_rows(metrics_list)  # Merge all iterations
+  
+    # Compute means and standard deviations across bootstrap iterations
+  
+    # **Check if we have valid metrics**
+  if (length(metrics_list) == 0) {
+    message("🚨 No valid results for ", response_var, " in ", data_type)
+    return(tibble(
+      Property = response_var, 
+      Data_Type = data_type, 
+      Model = model_type,
+      Mean_R2 = NA, SD_R2 = NA, 
+      Mean_RMSE = NA, SD_RMSE = NA, 
+      Mean_Bias = NA, SD_Bias = NA 
+      
+    ))
+  }
+  
+  metrics_summary <- metrics_df %>%
+    summarise(
+      Mean_R2 = mean(R_sq, na.rm = TRUE),
+      SD_R2 = sd(R_sq, na.rm = TRUE),
+      Mean_RMSE = mean(RMSE, na.rm = TRUE),
+      SD_RMSE = sd(RMSE, na.rm = TRUE),
+      Mean_Bias = mean(bias, na.rm = TRUE),
+      SD_Bias = sd(bias, na.rm = TRUE)
+    ) %>%
+    mutate(Property = response_var, Data_Type = data_type, Model = model_type)
+
+  return(metrics_summary)
+}
+```
+
+### Defining Models (PLSR, RF, GBDT, BRNN)
+
+```{r}
+
+# Wrapper function to run analysis for each property in slprptr with specified model_type
+run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
+                               num_bootstrap = 50, use_source = FALSE, source_name = NULL, 
+                               tuning_goal = "rmsep", property_range = 2:length(slprptr),
+                                include_zv = FALSE, 
+                                include_pca = FALSE, num_pca_comp = NULL 
+                               #variance_threshold = NULL,
+                               # include_pls = FALSE, variance_threshold_pls = NULL,
+                               # include_rf = FALSE, forest_threshold = NULL
+                               ) {
+
+  output_dir <- paste0("Plots_WellFitted_Properties_", identifier)
+
+  # Store model results for debugging and future analysis
+  model_results <- list()
+
+  # Loop through each property and collect metrics
+  all_metrics <- furrr::future_map_dfr(property_range, function(.x) {
+    tryCatch({
+      message("Processing property: ", .x, " : ", slprptr[.x])
+    
+     library(plsmod) 
+     set.seed(345)
+
+    # Extract property-specific data 
+    property_data <- select_property_data(slprptr, .x, df1, spec_trt)
+    df.f <- property_data$df.f
+    df.sel <- property_data$df.sel
+
+    # Check if there are enough observations to proceed 
+    if (nrow(df.sel) <= 20) {
+      message(paste("Skipping property:", slprptr[.x], "due to insufficient data"))
+      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = model_type, R_sq = NA, RMSE = NA, bias = NA, ncomp = NA))
+    }
+    
+  # Generate bootstrap resamples
+    boot_splits <- generate_bootstrap_splits(df.sel, num_bootstrap, use_source, source_name)
+    
+    
+    # If boot_splits is NULL, skip this property
+if (is.null(boot_splits)) {
+  message("Skipping property due to insufficient data.")
+  return(tibble(
+    Property = slprptr[.x],
+    Data_Type = "Skipped",
+    Model = model_type,
+    R_sq = NA,
+    RMSE = NA,
+    bias = NA,
+    ncomp = NA
+  ))
+}
+
+      boot_data <- tryCatch({
+  map(boot_splits$splits, split_bootstrap_sample)  # Pass rsplit objects directly
+}, error = function(e) {
+  message("Error in mapping split_bootstrap_sample: ", e$message)
+  NULL
+}) 
+      
+          # If boot_data is NULL, skip processing
+    if (is.null(boot_data)) {
+      message("Skipping property due to bootstrap failure: ", slprptr[.x])
+      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = model_type, R_sq = NA, RMSE = NA, bias = NA, ncomp = NA))
+    }
+
+    # Prepare bootstrap train/test splits
+    valid_splits <- prepare_model_data(boot_data, slprptr, .x)
+    
+    if (is.null(valid_splits)) {
+    stop("🚨 Error: valid_splits is NULL for property ", slprptr[.x])
+    }
+    
+   preprocessed_splits <- tryCatch({
+    preprocess_data(valid_splits, slprptr, .x,
+                    include_zv = include_zv,
+                    include_pca = include_pca, num_pca_comp = num_pca_comp 
+                    # variance_threshold = variance_threshold,
+                    # include_pls = include_pls, variance_threshold_pls = variance_threshold_pls,
+                    # include_rf = include_rf, forest_threshold = forest_threshold
+                    )
+}, error = function(e) {
+    message(" Error in preprocess_data() for ", slprptr[.x], ": ", e$message)
+    return(NULL)
+})
+   if (is.null(preprocessed_splits)) {
+      return(tibble(Property = slprptr[.x],
+                    Data_Type = "Skipped",
+                    Model = model_type,
+                    R_sq = NA, RMSE = NA, bias = NA, ncomp = NA))
+    }
+
+
+# 🔍 **Check if preprocessed_splits is NULL**
+# if (is.null(preprocessed_splits)) {
+#     stop(" ERROR: preprocessed_splits is NULL after preprocess_data()!")
+# }
+    
+    # # Ensure train/test data is not empty after preprocessing 
+    # if (nrow(preprocessed_splits$train_data) == 0 || nrow(preprocessed_splits$test_data) == 0) {
+    #   message(paste("Skipping property:", slprptr[.x], "due to empty train/test data after preprocessing."))
+    #   return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = model_type, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
+    # }
+
+    # # Skip properties with insufficient train/test data
+    # if (nrow(valid_splits$train_data) <= 10 || nrow(valid_splits$test_data) <= 10) {
+    #   message(paste("Skipping property:", slprptr[.x], "due to insufficient train/test data"))
+    #   return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = model_type, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
+    # }
+  
+    # Set up the model specification 
+    if (model_type == "pls") {
+      model_spec_list <- setup_model(model_type, preprocessed_splits, response_var = slprptr[.x])
+    } else if (model_type == "rf") {
+      model_spec_list <- setup_model(model_type, preprocessed_splits, response_var = slprptr[.x])
+    } else if (model_type == "gbdt") {
+      model_spec_list <- setup_model(model_type, preprocessed_splits, response_var = slprptr[.x])
+    } else if (model_type == "brnn") {
+      model_spec_list <- setup_model(model_type, preprocessed_splits, response_var = slprptr[.x])
+    } else {
+      stop(paste("Unsupported model type:", model_type))
+    }
+   
+   # Compute the global minimum PCA component count across iterations,
+# ignoring any NAs
+n_comp_pca_list <- purrr::map_dbl(preprocessed_splits, "n_comp_pca")
+#DEBUG 
+message("n_comp_pca values: ", paste(n_comp_pca_list, collapse = ", "))
+min_n_comp_pca <- min(n_comp_pca_list, na.rm = TRUE)
+min_n_comp_pca
+
+   
+   tuned_models <- tryCatch({
+     fit_model(
+  model_spec_list = map(model_spec_list$models, "model_spec"), 
+  train_data_list = map(preprocessed_splits, "train_data"),
+  test_data_list = map(preprocessed_splits, "test_data"),
+  recipe_list = map(preprocessed_splits, "recipe"),
+  model_type = model_type,
+  tuning_goal = tuning_goal,
+  property_name = slprptr[.x],
+           include_zv = include_zv,
+           include_pca = include_pca,
+           num_pca_comp = num_pca_comp,
+          # variance_threshold = variance_threshold,
+          # include_pls = include_pls,
+          # variance_threshold_pls = variance_threshold_pls,
+          # n_comp_pca = map(preprocessed_splits, "n_comp_pca"),
+          # n_comp_pca = preprocessed_splits[[1]]$n_comp_pca
+          n_comp_pca = min_n_comp_pca
+          # n_comp_pls = map(preprocessed_splits, "n_comp_pls"),
+          # include_rf = include_rf,
+          # forest_threshold = forest_threshold
+        )
+   }, error = function(e) {
+       message("❌ Model fitting failed for property: ", slprptr[.x],
+          "\nError: ", e$message)
+              return(list(model = NA, train_predictions = NA, test_predictions = NA, best_params = NA))
+            })
+   
+   if (is.null(tuned_models) || 
+    !("model" %in% names(tuned_models)) || 
+    length(tuned_models$model) == 0 || 
+    is.na(tuned_models$model[1])) {
+  message("Skipping property: ", slprptr[.x], " due to model fitting failure.")
+  return(tibble(
+    Property  = slprptr[.x],
+    Data_Type = "Skipped",
+    Model     = model_type,
+    R_sq      = NA,
+    RMSE      = NA,
+    bias      = NA,
+    ncomp     = NA
+  ))
+}
+
+            
+    # Compute predictions for training and test data
+    cal_predictions <- map(tuned_models, "train_predictions")
+    val_predictions <- map(tuned_models, "test_predictions")
+    
+
+  
+    # # Calculate performance metrics 
+    
+  cal_metrics <- calculate_metrics(
+  results_list = tuned_models, 
+  data_type = "Calibration", 
+  slprptr = slprptr, 
+  .x = .x, 
+  model_type = model_type
+)
+   
+  val_metrics <- calculate_metrics(
+  results_list = tuned_models, 
+  data_type = "Validation", 
+  slprptr = slprptr, 
+  .x = .x, 
+  model_type = model_type
+  # Extract test data for all bootstrap iterations
+)
+
+    # Combine Calibration and Validation metrics
+    return(bind_rows(cal_metrics, val_metrics))
+  }, error = function(e) {
+    message("Error processing property ", slprptr[.x], ": ", e$message)
+    tibble(Property = slprptr[.x],
+           Data_Type = "Skipped",
+           Model = model_type,
+           R_sq = NA, RMSE = NA, bias = NA, ncomp = NA)
+  })
+  
+  output_file <- paste0(output_dir, "/bootstrap_metrics_", identifier, ".xlsx")
+  writexl::write_xlsx(all_metrics, path = output_file)
+  message("Metrics saved to: ", output_file)
+})
+  return(all_metrics)
+
+}
+```
+
+#### Aside: Cumulative Variance for PLSR
 
 ```{r}
 
@@ -762,231 +940,200 @@ calculate_explained_variance <- function(train_data, response_var, max_comps) {
 }
 ```
 
+### Fitting Model (tuning hyperparameters)
+
 ```{r}
 
-# Main fit_model function
-fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type,
-                      tuning_goal = "rmsep", cumulative_variance_threshold = 0.85,property_name = NULL,include_zv = FALSE, variance_threshold = NULL, include_pca = FALSE,  n_comp_pca_variance = NULL,num_pca_comp = NULL,  n_comp_pca = NULL) { 
-  message("DEBUG: n_comp_pca inside fit_model(): ", n_comp_pca)
-  
-  model_spec <- model_spec_list$model_spec
-  mtry_range <- model_spec_list$mtry_range  # Only for Random Forest
-
-  # Set up workflow with recipe and model
-  biochar_workflow <- workflow() %>%
-    add_recipe(recipe) %>%
-    add_model(model_spec)
- 
-   # Setting defalt CV
-    set.seed(123)
-  cv_folds <- if (nrow(train_data) <= 10) {
-    vfold_cv(train_data, v = nrow(train_data))  
-  } else {
-    vfold_cv(train_data, v = 10)  
-  }
-
-  if (model_type == "pls") {
+fit_model <- function(model_spec_list, train_data_list, test_data_list, recipe_list, model_type,
+                      tuning_goal = "rmsep", cumulative_variance_threshold = 0.85, property_name = NULL,
+                       include_zv = FALSE, 
+                      # variance_threshold = NULL, 
+                       include_pca = FALSE, 
+                      # include_pls = FALSE,  
+                      # n_comp_pca_variance = NULL,
+                       num_pca_comp = NULL, 
+                       n_comp_pca = NULL 
+                      # n_comp_pls = NULL, 
+                      # variance_threshold_pls = NULL, 
+                      # include_rf = FALSE, 
+                      # forest_threshold = NULL
+                      ) { 
     
-      # Define cross-validation folds (LOOCV for <= 10 samples)
-  set.seed(123)  # Ensure reproducibility
-  cv_folds <- if (nrow(train_data) <= 10) {
-    vfold_cv(train_data, v = nrow(train_data))  # Leave-One-Out CV
-  } else {
-    vfold_cv(train_data, v = 10)  # 10-fold CV
-  }
-      # Ensure max_comps considers both num_pca_comp and variance_threshold dynamically
-    if (isTRUE(include_pca) && !is.null(n_comp_pca)) {
-    max_comps <- min(25, nrow(train_data) - 1,  ncol(train_data), n_comp_pca)
-  } else {
-    max_comps <- min(25, nrow(train_data) - 4,  ncol(train_data))
-  }
-
-    if (tuning_goal == "rmsep") {
-      # Perform 10-fold (or LOOCV) to minimize RMSEP
-      num_comp_grid <- tibble(num_comp = 1:max_comps)
-      tune_results <- tune_grid(
-        biochar_workflow,
-        resamples = cv_folds,
-        grid = num_comp_grid,
-        metrics = metric_set(rmse),
-        control = control_grid(save_pred = TRUE)
-      )
-
-      best_params <- tune_results %>% select_best(metric = "rmse") %>% dplyr::select(num_comp)
-      final_workflow <- finalize_workflow(biochar_workflow, best_params)
-      
-      #*Only Generate RMSEP Plot for PLS Models**
-      if (!is.null(property_name)) {
-        rmsep_data <- tune_results %>%
-          collect_metrics() %>%
-          filter(.metric == "rmse") %>%
-          dplyr::select(num_comp, mean)
-
-        rmsep_plot <- ggplot(rmsep_data, aes(x = num_comp, y = mean)) +
-          geom_line() +
-          geom_point() +
-          theme_minimal() +
-          labs(
-            title = paste("PLS: Comp vs RMSEP for", property_name),
-            x = "Number of Components",
-            y = "RMSEP"
-          )
-
-        print(rmsep_plot)
-      }  # Display the plot in R
-
-    } else if (tuning_goal == "variance") {
-      
-        # Define cross-validation folds (LOOCV for <= 10 samples)
-      set.seed(123)  # Ensure reproducibility
-      cv_folds <- if (nrow(train_data) <= 10) {
-        vfold_cv(train_data, v = nrow(train_data))  # Leave-One-Out CV
-      } else {
-        vfold_cv(train_data, v = 10)  # 10-fold CV
-      }
-      
-      # Calculate cumulative explained variance
-      response_var <- colnames(train_data)[[2]]  # Adjust index if response var is at a different position
-      explained_variance <- calculate_explained_variance(train_data, response_var, max_comps)
-
-      # Find the minimum number of components meeting the variance threshold
-      num_comp <- which(explained_variance >= cumulative_variance_threshold)[1]
-      if (is.na(num_comp) || is.null(num_comp)) {
-        message(paste("Skipping property:", response_var, "due to insufficient cumulative variance."))
-        return(tibble(
-          Property = response_var,
-          Data_Type = "Skipped",
-          Model = model_type,
-          N = NA,
-          R2 = NA,
-          RMSE = NA,
-          bias = NA,
-          ncomp = NA
-        ))
-      }
-
-      # Validate the selected number of components with cross-validation
-      num_comp_grid <- tibble(num_comp = num_comp)
-      tune_results <- tune_grid(
-        biochar_workflow,
-        resamples = cv_folds,
-        grid = num_comp_grid,
-        metrics = metric_set(rmse),
-        control = control_grid(save_pred = TRUE)
-      )
-    best_params <- tibble(num_comp = num_comp)
-    final_workflow <- finalize_workflow(biochar_workflow, best_params)
+  # Iterate over bootstrap samples
+  results_list <- map2(seq_along(train_data_list), train_data_list, function(iter, train_data) {
+    ## assigns each element of train_data_list to train_data, iterativel
+    
+    test_data <- test_data_list[[iter]]
+    recipe <- recipe_list[[iter]]
+    
+     # Skip if train_data or test_data is NULL
+    if (is.null(train_data) || is.null(test_data) || nrow(train_data) == 0 || nrow(test_data) == 0) {
+      message("Skipping iteration ", iter, " due to missing or empty data")
+      return(NULL)
     }
-  } else if (model_type == "rf") {
-  set.seed(123)
-  
-  
-  # Dynamically adjust folds
-  cv_folds <- if (nrow(train_data) <= 20) {
-    vfold_cv(train_data, v = min(floor(nrow(train_data) / 2), 5))  # Cap folds for small datasets
-  } else {
-    vfold_cv(train_data, v = min(10, nrow(train_data) - 1))  # Default for larger datasets
-  }
-  
-  # Log fold details
-  #message("Number of folds: ", length(cv_folds$splits))
-  #test_sizes <- purrr::map_int(cv_folds$splits, ~ nrow(assessment(.x)))
-  #train_sizes <- purrr::map_int(cv_folds$splits, ~ nrow(analysis(.x)))
-  #message("Test set sizes: ", paste(test_sizes, collapse = ", "))
-  #message("Train set sizes: ", paste(train_sizes, collapse = ", "))
-  
-  # Fallback for very small datasets
-  # if (nrow(train_data) < 20 || min(test_sizes) < 5) {
-  #   warning("Dataset too small for cross-validation. Using fixed train-test split.")
-  #   
-  #   split <- initial_split(train_data, prop = 0.8)
-  #   inner_train <- training(split)
-  #   inner_test <- testing(split)
+
+    model_spec <- model_spec_list[[iter]] 
+    #View(model_spec)
+    #mtry_range <- model_spec_list[[1]]$mtry_range  # Only for RF
+##WILL CAUSE ERROR 
     
-    # if (nrow(inner_train) < 5 || nrow(inner_test) < 2) {
-    #   stop("Insufficient data for fixed split. Skipping property.")
-    # }
-    
-    rf_model <- rand_forest(
-      mtry = floor(sqrt(ncol(train_data) - 1)),# overridden by tuning grid
-      min_n = 2,# overridden by tuning grid
-      trees = 1000
-    ) %>%
-      set_engine("ranger") %>%
-      set_mode("regression")
-    
-    final_workflow <- workflow() %>%
+    # Set up workflow with recipe and model
+    biochar_workflow <- workflow() %>%
       add_recipe(recipe) %>%
-      add_model(rf_model)
-    
-    #model_fit <- fit(final_workflow, data = train_data)
-    #predictions <- predict(model_fit, inner_test)
-    
-    # return(list(model = model_fit, predictions = predictions))
-  #}
-  
-  # Dynamically adjust grid size
-  rf_grid <- grid_random(
-    mtry_range,
-    min_n(range = c(1, min(5, floor(nrow(train_data) / 3)))),  # Smaller range for min_n
-    size = min(nrow(train_data) / length(cv_folds$splits), 5)  # Adjust grid size dynamically
-  )
-  
-  # Log grid size
-  #message("Grid size: ", nrow(rf_grid))
-  
-  # Tune the model
-  tune_results <- tune_grid(
+      add_model(model_spec)
+
+    # Set default CV folds
+    set.seed(123)
+    cv_folds <- if (nrow(train_data) <= 10) {
+      vfold_cv(train_data, v = nrow(train_data))  
+    } else {
+      vfold_cv(train_data, v = 10)  
+    }
+
+    if (model_type == "pls") {
+      # Determine max_comps dynamically
+      if (isTRUE(include_pca) && !is.null(n_comp_pca)) {
+        max_comps <- min(25, nrow(train_data) - 1,  ncol(train_data), n_comp_pca)
+      } else {
+         max_comps <- min(25, nrow(test_data) - 4,  ncol(test_data))
+      }
+      
+        # NEW: check if max_comps is valid
+  if (max_comps < 1) {
+  message("Skipping property ", slprptr[.x], " because max_comps is less than 1.")
+  return(tibble(Property = slprptr[.x],
+                Data_Type = "Skipped",
+                Model = model_type,
+                R_sq = NA, RMSE = NA, bias = NA, ncomp = NA))
+}
+
+      if (tuning_goal == "rmsep") {
+        # Perform CV tuning for RMSEP
+        num_comp_grid <- tibble(num_comp = 1:max_comps)
+        # tune_results <- tune_grid(
+        #   biochar_workflow,
+        #   resamples = cv_folds,
+        #   grid = num_comp_grid,
+        #   metrics = metric_set(rmse),
+        #   control = control_grid(save_pred = TRUE)
+        # )
+        
+        tune_results <- tryCatch({
+  tune_grid(
     biochar_workflow,
     resamples = cv_folds,
-    grid = rf_grid,
+    grid = num_comp_grid,
     metrics = metric_set(rmse),
-    control = control_grid(save_pred = TRUE)  # Add verbose output
+    control = control_grid(save_pred = TRUE)
   )
-  
-  best_params <- tune_results %>% select_best(metric = "rmse")
-  final_workflow <- finalize_workflow(biochar_workflow, best_params)
-  
-  } else if (model_type == "brnn") {
-       num_predictors <- ncol(train_data) - 2  # Adjust if more metadata columns exist
-       max_hidden_units <- min(20, floor(log2(num_predictors)))  # Choose sqrt(features) but cap at 5
+}, error = function(e) {
+  warning("⚠️ Error in PLS tuning: ", e$message)
+  return(NULL)
+})
 
-    brnn_grid <- grid_random(
-      hidden_units(range = c(1, max_hidden_units)),
-      penalty(range = c(0.001, 0.1)),
-      size = 10
-    )
-    
-    tune_results <- tune_grid(
-      biochar_workflow,
-      resamples = cv_folds,
-      grid = brnn_grid,
-      metrics = metric_set(rmse),
-      control = control_grid(save_pred = TRUE)
-    )
+  # NEW: Check if tune_results is empty before proceeding.
+  if (is.null(tune_results) || nrow(tune_results) == 0) {
+    message("⚠️ Tuning yielded no results for property ", property_name, ". Skipping.")
+    return(list(model = NA, train_predictions = NA, test_predictions = NA, best_params = NA, test_truth = test_data))
+  }
+  
 
-    best_params <- tune_results %>% select_best(metric = "rmse")
-    final_workflow <- finalize_workflow(biochar_workflow, best_params)
-    
-    } else if (model_type == "gbdt") {
-      
+        #best_params <- tune_results %>% select_best(metric = "rmse") %>% dplyr::select(num_comp)
+          best_params <- tryCatch({
+    tune_results %>% select_best(metric = "rmse") %>% dplyr::select(num_comp)
+  }, error = function(e) {
+    warning("⚠️ select_best failed: ", e$message)
+    return(NULL)
+  })
+  
+  if (is.null(best_params) || nrow(best_params) == 0) {
+    message("⚠️ No valid best parameters found for property ", property_name, ". Skipping.")
+    return(list(model = NA, train_predictions = NA, test_predictions = NA, best_params = NA, test_truth = test_data))
+  }
+        final_workflow <- finalize_workflow(biochar_workflow, best_params)
+
+      } else if (tuning_goal == "variance") {
+        # Calculate explained variance
+        response_var <- colnames(train_data)[[2]]  # Adjust index if response var is elsewhere
+        explained_variance <- calculate_explained_variance(train_data, response_var, max_comps)
+
+        # Find min num_comp meeting variance threshold
+        num_comp <- which(explained_variance >= cumulative_variance_threshold)[1]
+        if (is.na(num_comp)) {
+          message(paste("Skipping property:", response_var, "due to insufficient cumulative variance."))
+          return(NULL)
+        }
+
+        # Validate num_comp with CV
+        num_comp_grid <- tibble(num_comp = num_comp)
+        tune_results <- tune_grid(
+          biochar_workflow,
+          resamples = cv_folds,
+          grid = num_comp_grid,
+          metrics = metric_set(rmse),
+          control = control_grid(save_pred = TRUE)
+        )
+
+        best_params <- tibble(num_comp = num_comp)
+        final_workflow <- finalize_workflow(biochar_workflow, best_params)
+      }
+    } else if (model_type == "rf") {
       set.seed(123)
-    #cv_folds <- vfold_cv(train_data, v = min(10, nrow(train_data) - 1))  # Reduce CV folds
-    cv_folds <- vfold_cv(train_data, v = ifelse(nrow(train_data) < 30, 5, min(10, nrow(train_data) - 1)))
-      # Define a GBDT-specific tuning grid
-      gbdt_grid <- grid_random(
-        trees(range = c(50, 200)),  # Tune number of trees #tried 300
-        #tree_depth(range = c(3, 10)),  # Tune tree depth
-        tree_depth(range = c(2, min(4, round(log2(nrow(train_data)))))),  # Log-based depth scaling
-        learn_rate(range = c(0.005, 0.03 )),  # Tune learning rate #Tried (0.1, 0.3)
-        loss_reduction(range = c(0, 5)),  # Add back to control unnecessary splits
-        min_n(range = c(2, min(10, round(0.05 * nrow(train_data))))),  # Bring back to prevent overfitting
-        mtry(range = c(ceiling(0.05 * ncol(train_data)), min(15, floor(0.4 * ncol(train_data))))),
-        # Proportion of predictors sampled at each split
-        size = 10 #10
-      )
+      cv_folds <- vfold_cv(train_data, v = min(10, nrow(train_data) - 1))
       
-      # Tune the GBDT model using the grid
+      # Tune Random Forest model
+      rf_grid <- grid_random(
+        mtry_range,
+        min_n(range = c(1, min(5, floor(nrow(train_data) / 3)))),
+        size = min(nrow(train_data) / length(cv_folds$splits), 5)
+      )
+
+      tune_results <- tune_grid(
+        biochar_workflow,
+        resamples = cv_folds,
+        grid = rf_grid,
+        metrics = metric_set(rmse),
+        control = control_grid(save_pred = TRUE)
+      )
+
+      best_params <- tune_results %>% select_best(metric = "rmse")
+      final_workflow <- finalize_workflow(biochar_workflow, best_params)
+
+    } else if (model_type == "brnn") {
+      num_predictors <- ncol(train_data) - 2
+      max_hidden_units <- min(20, floor(log2(num_predictors)))
+
+      brnn_grid <- grid_random(
+        hidden_units(range = c(1, max_hidden_units)),
+        penalty(range = c(0.001, 0.1)),
+        size = 10
+      )
+
+      tune_results <- tune_grid(
+        biochar_workflow,
+        resamples = cv_folds,
+        grid = brnn_grid,
+        metrics = metric_set(rmse),
+        control = control_grid(save_pred = TRUE)
+      )
+
+      best_params <- tune_results %>% select_best(metric = "rmse")
+      final_workflow <- finalize_workflow(biochar_workflow, best_params)
+
+    } else if (model_type == "gbdt") {
+      set.seed(123)
+      cv_folds <- vfold_cv(train_data, v = ifelse(nrow(train_data) < 30, 5, min(10, nrow(train_data) - 1)))
+
+      gbdt_grid <- grid_random(
+        trees(range = c(50, 200)),
+        tree_depth(range = c(2, min(4, round(log2(nrow(train_data)))))),
+        learn_rate(range = c(0.005, 0.03)),
+        loss_reduction(range = c(0, 5)),
+        min_n(range = c(2, min(10, round(0.05 * nrow(train_data))))),
+        mtry(range = c(ceiling(0.05 * ncol(train_data)), min(15, floor(0.4 * ncol(train_data))))),
+        size = 10
+      )
+
       tune_results <- tryCatch({
         tune_grid(
           biochar_workflow,
@@ -1000,69 +1147,97 @@ fit_model <- function(model_spec_list, train_data, test_data, recipe, model_type
         return(NULL)
       })
 
-      # If tuning failed, return NULL
-      if (is.null(tune_results)) return(NULL)
-
-      # Select the best parameters based on RMSE
-      best_params <- tune_results %>% select_best(metric = "rmse")
-      # Finalize the workflow with the best parameters
-      final_workflow <- finalize_workflow(biochar_workflow, best_params)
-      
+       # If tuning failed, skip
+    if (is.null(tune_results) || nrow(tune_results) == 0) {
+      message("⚠️ Skipping iteration ", iter, " due to tuning failure")
+      return(NULL)
     }
+      
+      # Check if tune_results is valid
+if (!is.null(tune_results) && nrow(tune_results) > 0) {
   
-  # Fit the final model
-  model_fit <- fit(final_workflow, data = train_data)
-  
-#   model_fit <- tryCatch(
-#   fit(final_workflow, data = train_data),
-#   error = function(e) {
-#     message("Error in model fitting: ", e$message)
-#     return(NULL)
-#   }
-# )
-
-  # Predictions for train and test data
-  train_predictions <- tryCatch({
-    predict(model_fit, new_data = train_data) %>%
-    as_tibble()  # Convert predictions to a tibble
-  }, error = function(e) {
-    message("Error in train_predictions: ", e)
+  # Ensure .metrics exists and is not NULL
+  if (is.null(tune_results$.metrics) || nrow(tune_results$.metrics[[1]]) == 0) {
+    message("🚨 No valid metrics in `tune_results` for iteration ", iter, ". Skipping...")
     return(NULL)
-  })
-
-  # Add rownames from `test_data` to `test_predictions`
-  if (!is.null(train_predictions)) {
-    rownames(train_predictions) <- rownames(train_data)
   }
 
-  test_predictions <- tryCatch({
-    predict(model_fit, new_data = test_data) %>%
-    as_tibble()  # Convert predictions to a tibble
-  }, error = function(e) {
-    message("Error in test_predictions: ", e)
-    return(NULL)
-  })
-
-  # Add rownames from `test_data` to `test_predictions`
-  if (!is.null(test_predictions)) {
-    rownames(test_predictions) <- rownames(test_data)
-  }
-
-  # Ensure predictions are non-null
-  if (is.null(train_predictions) || is.null(test_predictions)) {
-    stop("Prediction failed: check data dimensions or NA values in predictor matrix.")
-  }
   
-  return(list(
-    model = model_fit,
-    train_predictions = train_predictions,
-    test_predictions = test_predictions,
-    best_params = best_params
-  ))
+} else {
+  message("⚠️ `tune_results` contains no valid results for iteration ", iter, ". Skipping...")
+  return(NULL)
+}
+
+      best_params <- tune_results %>% select_best(metric = "rmse")
+      
+      best_params <- tryCatch({
+  tune_results %>% select_best(metric = "rmse")
+}, error = function(e) {
+  message("⚠️ Skipping iteration ", iter, " as no best parameters could be selected")
+  return(NULL)
+})
+      # If best_params is NULL, skip this iteration
+if (is.null(best_params) || nrow(best_params) == 0) {
+  message("⚠️ No valid parameters found for iteration ", iter, ". Skipping model fitting.")
+  return(NULL)
+}
+      
+      final_workflow <- finalize_workflow(biochar_workflow, best_params)
+    }
+
+    # Fit final model
+   # model_fit <- fit(final_workflow, data = train_data)
+    
+        # Try-Catch for model fitting
+    model_fit <- tryCatch({
+      fit(final_workflow, data = train_data)
+    }, error = function(e) {
+      message("🚨 Model fitting failed for iteration ", iter, ": ", e$message)
+      return(NULL)
+    })
+    
+      if (is.null(model_fit)) {
+      return(NULL)
+    }
+
+    # Generate predictions for train and test sets
+    train_predictions <- tryCatch({
+      predict(model_fit, new_data = train_data) %>%
+        as_tibble()
+    }, error = function(e) {
+      message("Error in train_predictions: ", e)
+      return(NULL)
+    })
+    
+
+    test_predictions <- tryCatch({
+      predict(model_fit, new_data = test_data) %>%
+        as_tibble()
+    }, error = function(e) {
+      message("Error in test_predictions: ", e)
+      return(NULL)
+    })
+
+    return(list(
+      model = model_fit,
+      train_predictions = train_predictions,
+      test_predictions = test_predictions,
+      best_params = best_params,
+      test_truth = test_data  # Store actual test response values
+
+    ))
+  })
+  
+  if (all(map_lgl(results_list, is.null))) {  
+  message("🚨 All bootstrap iterations failed for property: ", property_name, ". Skipping model training.")
+  return(NULL)  # Return NULL to indicate failure
+}
+  
+  return(results_list)  # Return results for all bootstrap iterations
 }
 ```
 
-#### PLSR
+## PLSR
 
 #### Tune to minimize RMSEP - MIR
 
@@ -1075,7 +1250,7 @@ Total split
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 19:51)
+                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 100) # , property_range = 50:51)
 ```
 
 Source-based split
@@ -1182,7 +1357,7 @@ Cornell only Predictions (focused on pH)
 
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_PCAfeat")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =20) #, property_range = 2:5) 
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =500, num_bootstrap = 5) #, property_range = 50:55) 
 ```
 
 \*\* Sparse Generalized Canonical Correlation Analysis (SGCCA) algorithm used in pls() modeling failed to find a stable solution within the allowed iterations.
@@ -1192,6 +1367,24 @@ run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_PCAfeat_variance")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
                    use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.95) #, property_range = 50:52) 
+```
+
+#### RF Top Features as features
+
+```{r}
+
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_RFfeat")  # For RMSEP
+
+run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
+                   use_source = FALSE, tuning_goal = "rmsep", include_rf = TRUE, forest_threshold = 0.02) #, property_range = 2:5) 
+```
+
+```{r}
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_RFfeat_pretune")
+
+run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
+                   use_source = FALSE, tuning_goal = "rmsep", 
+                   include_rf = TRUE, forest_threshold = 0.02, rf_tuning_file = "Plots_WellFitted_Properties_RF_RMSEP_MIR_totsplit_99perc/all_metrics_RF_RMSEP_MIR_totsplit_99perc.xlsx")
 ```
 
 #### Tune to minimize RMSEP - NIR
@@ -1284,7 +1477,7 @@ Cornell only Predictions - MIR + NIR
 
 \*\* doesn't make sense to run
 
-### RANDOM FOREST
+## RANDOM FOREST
 
 #### Tune to minimize RMSEP - MIR
 
@@ -1292,7 +1485,7 @@ Cornell only Predictions - MIR + NIR
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
+                   use_source = FALSE, tuning_goal = "rmsep", property_range = 49:51)
 ```
 
 ```{r}
@@ -1398,19 +1591,48 @@ Number of components
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_PCAfeat")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =15) #, property_range = 58:65) 
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =20) #, property_range = 58:65) ˆ
 ```
 
 Captured variance
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_PCAfeat")  # For RMSEP
+identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_PCAfeat_Var")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
                    use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.95) #, property_range = 39:41 ) #property_range = 49:51,
 ```
 
-#### Tune to minimize RMSEP - NIR
+#### PLSR Components as features
+
+```{r}
+
+identifier <- initialize_workspace("RF_RMSEP_MIR_totspslit_PLSfeat_RMSEP")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
+                   use_source = FALSE, tuning_goal = "rmsep", include_pls = TRUE) #, property_range = 2:5) 
+```
+
+```{r}
+
+identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_PLSfeat_Var") 
+
+run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
+                   use_source = FALSE, tuning_goal = "rmsep", include_pls = TRUE, variance_threshold_pls = 0.95)
+```
+
+#### RF Top Features as features
+
+```{r}
+
+identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_RFfeat")  # For RMSEP
+
+run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
+                   use_source = FALSE, tuning_goal = "rmsep", include_rf = TRUE, forest_threshold = 0.02) #, property_range = 2:5) 
+```
+
+#### 
+
+#### (Cont. from here 13/02/2025) Tune to minimize RMSEP - NIR
 
 ```{r}
 
@@ -1505,17 +1727,19 @@ run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier
                    use_source = TRUE, tuning_goal = "rmsep")
 ```
 
+ERRORRR
+
 ```{r}
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_CornellOnlysplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell",tuning_goal = "rmsep")
+                   use_source = FALSE, source_name = "Cornell", tuning_goal = "rmsep")
 
 
 #Note: skips testing of all properties - insufficient data. 
 ```
 
-#### Lab Covariate - MIR + NIR
+#### Lab Covariate - MIR + NIR8
 
 ```{r}
 
@@ -1640,9 +1864,9 @@ run_all_properties(
   use_source = FALSE,
   tuning_goal = "rmsep",
   property_range = 52:56, #length(slprptr),
-  include_pca = TRUE,
-  identifier,
-  num_pca_comp = 20
+  #include_pca = TRUE,
+  identifier#,
+  #num_pca_comp = 20
   #variance_threshold = 0.95
 )
 ```
@@ -1658,7 +1882,7 @@ run_all_properties(
   model_type = "brnn",
   use_source = TRUE,
   tuning_goal = "rmsep",
-  property_range = 52:56, #length(slprptr),
+  #property_range = 52:56, #length(slprptr),
   include_pca = TRUE,
   identifier,
   variance_threshold = 0.95
@@ -1678,9 +1902,13 @@ run_all_properties(
   use_source = FALSE,
   tuning_goal = "rmsep",
   property_range = 2:length(slprptr),
-  include_pca = TRUE
+  include_pca = TRUE,
+  identifier,
+  variance_threshold = 0.95
 )
 ```
+
+Stopped HERE
 
 ```{r}
 identifier <- initialize_workspace("BRNN_RMSEP_MIR_sourcesplit_lab")
@@ -1694,9 +1922,51 @@ run_all_properties(
   tuning_goal = "rmsep",
   property_range = 2:length(slprptr),
   identifier,
-  include_pca = TRUE
+  include_pca = TRUE,
+  variance_threshold = 0.95
 )
 ```
+
+#### Tune to minimize RMSEP - NIR
+
+```{r}
+
+identifier <- initialize_workspace("BRNN_RMSEP_NIR_totsplit")
+
+run_all_properties(
+  slprptr = slprptr,
+  df1 = df1,
+  spec_trt = spec_trt_NIR,
+  model_type = "brnn",
+  use_source = FALSE,
+  tuning_goal = "rmsep",
+  #property_range = 52:56, #length(slprptr),
+  include_pca = TRUE,
+  identifier,
+  num_pca_comp = 20
+  #variance_threshold = 0.95
+)
+```
+
+```{r}
+
+identifier <- initialize_workspace("BRNN_RMSEP_NIR_sourcesplit")
+  
+run_all_properties(
+  slprptr = slprptr,
+  df1 = df1,
+  spec_trt = spec_trt_NIR,
+  model_type = "brnn",
+  use_source = TRUE,
+  tuning_goal = "rmsep",
+  #property_range = 52:56, #length(slprptr),
+  include_pca = TRUE,
+  identifier,
+  variance_threshold = 0.95
+)
+```
+
+#### 
 
 #### Tune to minimize RMSEP - MIR + NIR
 
@@ -1712,7 +1982,8 @@ run_all_properties(
   tuning_goal = "rmsep",
   property_range = 2:length(slprptr),
   identifier,
-  include_pca = TRUE
+  include_pca = TRUE,
+  variance_threshold = 0.95
 )
 ```
 
@@ -1729,7 +2000,8 @@ run_all_properties(
   tuning_goal = "rmsep",
   property_range = 2:length(slprptr),
   identifier,
-  include_pca = TRUE
+  include_pca = TRUE,
+  variance_threshold = 0.95
 )
 ```
 
@@ -1748,7 +2020,8 @@ run_all_properties(
   tuning_goal = "rmsep",
   property_range = 2:length(slprptr),
   identifier,
-  include_pca = TRUE
+  include_pca = TRUE,
+  variance_threshold = 0.95
 )
 ```
 
@@ -1765,7 +2038,66 @@ run_all_properties(
   tuning_goal = "rmsep",
   property_range = 2:length(slprptr),
   identifier,
-  include_pca = TRUE
+  include_pca = TRUE,
+  variance_threshold = 0.95
+)
+```
+
+#### PLSR Components as features
+
+```{r}
+
+identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit_PLSfeat")
+
+run_all_properties(
+  slprptr = slprptr,
+  df1 = df1,
+  spec_trt = spec_trt,
+  model_type = "brnn",
+  use_source = FALSE,
+  tuning_goal = "rmsep",
+  #property_range = 52:56, #length(slprptr),
+  include_pls = TRUE,
+  identifier
+  #variance_threshold = 0.95
+)
+```
+
+```{r}
+
+identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit_PLSfeat_Var")
+
+run_all_properties(
+  slprptr = slprptr,
+  df1 = df1,
+  spec_trt = spec_trt,
+  model_type = "brnn",
+  use_source = FALSE,
+  tuning_goal = "rmsep",
+  #property_range = 52:56, #length(slprptr),
+  include_pls = TRUE,
+  identifier,
+  variance_threshold_pls = 0.95
+)
+```
+
+#### RF Top Features as features
+
+```{r}
+
+identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit_RFfeat")  # For RMSEP
+
+run_all_properties(
+  slprptr = slprptr,
+  df1 = df1,
+  spec_trt = spec_trt,
+  model_type = "brnn",
+  use_source = FALSE,
+  tuning_goal = "rmsep",
+  #property_range = 52:56, #length(slprptr),
+  include_rf = TRUE,
+  identifier,
+  forest_threshold = 0.99 #try 0.10 if 'too many weights' error is persistent
 )
 ```
 

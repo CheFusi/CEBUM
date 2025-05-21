@@ -168,9 +168,16 @@ generate_bootstrap_splits <- function(df.sel, num_bootstrap, use_source = FALSE,
   } else {
     boot_splits <- bootstraps(df.sel, times = num_bootstrap)
   }
-
+  
+  ##DEBUG
+  message("  ▶︎ Generated ", length(boot_splits$splits), " bootstraps; first split sizes: ",
+        nrow(analysis(boot_splits$splits[[1]])), "/", 
+        nrow(assessment(boot_splits$splits[[1]])))
   return(boot_splits)
+  
 }
+
+
 
 # Function to split bootstrap resample into train/test
 split_bootstrap_sample <- function(boot_sample) {
@@ -181,11 +188,14 @@ split_bootstrap_sample <- function(boot_sample) {
   train_data <- train_data %>% dplyr::select(-Source)
   test_data <- test_data %>% dplyr::select(-Source)
   
+  #DEBUG
+ # print(class(train_data))
   return(list(train_data = train_data, test_data = test_data))
+  
 }
 ```
 
-**NOTE: prepare_model_data and preprocess_data functions are a bit redundant ... consider combining one you solidfy script**
+**NOTE: prepare_model_data and preprocess_data functions are a bit redundant ... consider combining once you solidify script**
 
 ```{r}
 
@@ -245,7 +255,7 @@ processed_splits <- safe_map(boot_data, function(split) {
   
   valid_splits <- compact(processed_splits)
 
-  return(valid_splits)  # Return list of processed train-test pairs, ensuring all outputs are NA-safe
+  return(valid_splits)  # Return list of processed train-test pairs, ensuring all outputs are 'NA-safe'
 }
 ```
 
@@ -504,6 +514,7 @@ setup_model <- function(model_type, preprocessed_splits, response_var = NULL) {
     train_data_list <- map(preprocessed_splits, "train_data")
     test_data_list <- map(preprocessed_splits, "test_data")
     
+    
     # Iterate over all bootstrap splits to set up models
     models <- map(train_data_list, function(train_data) {
 
@@ -609,6 +620,7 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
       predictions <- result$train_predictions
     } else if (data_type == "Validation") {
       truth <- result$test_truth[[response_var]]  # Use explicitly stored test values
+
       predictions <- result$test_predictions
     } else {
       stop("Invalid data_type specified.")
@@ -626,7 +638,8 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
     }
 
     # Calculate performance metrics
-    r2_value <- safe_compute(rsq_vec(truth = truth, estimate = predictions$.pred))
+    #r2_value <- safe_compute(rsq_vec(truth = truth, estimate = predictions$.pred))
+        r2_value <- (rsq_vec(truth = truth, estimate = predictions$.pred))
     rmse_value_plain <- safe_compute(rmse_vec(truth = truth, estimate = predictions$.pred))
     bias_value <- safe_compute(mean(predictions$.pred - truth, na.rm = TRUE) / mean(truth, na.rm = TRUE) * 100)
     
@@ -634,11 +647,13 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
   response_range <- safe_compute(max(truth, na.rm = TRUE) - min(truth, na.rm = TRUE))
   
   rmse_value <- if (!is.na(response_range) && response_range > 0) rmse_value_plain / (response_range / 10) else NA
-
+  
     return(tibble(R_sq = r2_value, RMSE = rmse_value, bias = bias_value))
   })
+  
+
     # 🔍 **Remove NULL results before summarization**
-  metrics_list <- compact(metrics_list)  
+  metrics_list <- compact(metrics_list)
   # Combine results and calculate mean & standard deviation across bootstrap iterations
   # Check if all iterations failed
    # Convert list of tibbles into a single tibble
@@ -717,7 +732,6 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
   # Generate bootstrap resamples
     boot_splits <- generate_bootstrap_splits(df.sel, num_bootstrap, use_source, source_name)
     
-    
     # If boot_splits is NULL, skip this property
 if (is.null(boot_splits)) {
   message("Skipping property due to insufficient data.")
@@ -739,6 +753,7 @@ if (is.null(boot_splits)) {
   NULL
 }) 
       
+      
           # If boot_data is NULL, skip processing
     if (is.null(boot_data)) {
       message("Skipping property due to bootstrap failure: ", slprptr[.x])
@@ -749,8 +764,9 @@ if (is.null(boot_splits)) {
     valid_splits <- prepare_model_data(boot_data, slprptr, .x)
     
     if (is.null(valid_splits)) {
-    stop("🚨 Error: valid_splits is NULL for property ", slprptr[.x])
+    stop("Error: valid_splits is NULL for property ", slprptr[.x])
     }
+    
     
    preprocessed_splits <- tryCatch({
     preprocess_data(valid_splits, slprptr, .x,
@@ -834,33 +850,43 @@ min_n_comp_pca
           # forest_threshold = forest_threshold
         )
    }, error = function(e) {
-       message("❌ Model fitting failed for property: ", slprptr[.x],
+       message("Model fitting failed for property: ", slprptr[.x],
           "\nError: ", e$message)
               return(list(model = NA, train_predictions = NA, test_predictions = NA, best_params = NA))
             })
    
-   if (is.null(tuned_models) || 
-    !("model" %in% names(tuned_models)) || 
-    length(tuned_models$model) == 0 || 
-    is.na(tuned_models$model[1])) {
-  message("Skipping property: ", slprptr[.x], " due to model fitting failure.")
-  return(tibble(
-    Property  = slprptr[.x],
-    Data_Type = "Skipped",
-    Model     = model_type,
-    R_sq      = NA,
-    RMSE      = NA,
-    bias      = NA,
-    ncomp     = NA
-  ))
-}
+      # Debug dump of the entire tuned_models list
+#message("==== tuned_models dump for property ", slprptr[.x], " ====")
+# What kind of object is it?
+#cat("Class of tuned_models:", class(tuned_models), "\n")
+# What slots/elements does it have?
+#print(names(tuned_models))
 
-            
+ # print(str(tuned_models))
+   
+     ##DEBUG with Kostia 
+   
+  #  if (is.null(tuned_models) ||
+  #   !("model" %in% names(tuned_models))  {
+  #     ##||
+  #  ## length(tuned_models$model) == 0 ||
+  #  ## is.na(tuned_models$model[1]))
+  # message("Skipping property: ", slprptr[.x], " due to model fitting failure.")
+  # return(tibble(
+  #   Property  = slprptr[.x],
+  #   Data_Type = "Skipped",
+  #   Model     = model_type,
+  #   R_sq      = NA,
+  #   RMSE      = NA,
+  #   bias      = NA,
+  #   ncomp     = NA
+  # ))
+  #  }
+
+          
     # Compute predictions for training and test data
     cal_predictions <- map(tuned_models, "train_predictions")
     val_predictions <- map(tuned_models, "test_predictions")
-    
-
   
     # # Calculate performance metrics 
     
@@ -962,8 +988,14 @@ fit_model <- function(model_spec_list, train_data_list, test_data_list, recipe_l
   # Iterate over bootstrap samples
   results_list <- map2(seq_along(train_data_list), train_data_list, function(iter, train_data) {
     ## assigns each element of train_data_list to train_data, iterativel
+    #print(str(test_data_list))
+    #print(class(test_data_list))
+   
+    #print(head(test_data_list[[3]][1:5, 1:5]))
+    #print(head(train_data_list[[3]][1:5, 1:5]))
     
     test_data <- test_data_list[[iter]]
+    
     recipe <- recipe_list[[iter]]
     
      # Skip if train_data or test_data is NULL
@@ -973,6 +1005,7 @@ fit_model <- function(model_spec_list, train_data_list, test_data_list, recipe_l
     }
 
     model_spec <- model_spec_list[[iter]] 
+    #print(model_spec_list[[3]])
     #View(model_spec)
     #mtry_range <- model_spec_list[[1]]$mtry_range  # Only for RF
 ##WILL CAUSE ERROR 
@@ -1075,6 +1108,7 @@ fit_model <- function(model_spec_list, train_data_list, test_data_list, recipe_l
         )
 
         best_params <- tibble(num_comp = num_comp)
+       
         final_workflow <- finalize_workflow(biochar_workflow, best_params)
       }
     } else if (model_type == "rf") {
@@ -1231,9 +1265,9 @@ if (is.null(best_params) || nrow(best_params) == 0) {
   if (all(map_lgl(results_list, is.null))) {  
   message("🚨 All bootstrap iterations failed for property: ", property_name, ". Skipping model training.")
   return(NULL)  # Return NULL to indicate failure
-}
-  
+  }
   return(results_list)  # Return results for all bootstrap iterations
+
 }
 ```
 
@@ -1250,7 +1284,7 @@ Total split
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 100) # , property_range = 50:51)
+                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 300, property_range = c(25:39,41:57,65:77))
 ```
 
 Source-based split
@@ -1260,7 +1294,7 @@ Source-based split
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep")
+                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 300 , property_range = c(25:39,41:57,65:77))
 ```
 
 Cornell only Predictions (focused on pH)
@@ -1270,7 +1304,7 @@ Cornell only Predictions (focused on pH)
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_CornellOnlysplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep")
+                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 300 , property_range = c(25:39,41:57,65:77))
 ```
 
 #### Tune to minimize RMSEP - MIR 80/20 Split
@@ -1334,7 +1368,7 @@ Total split
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_Lab")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep") #, property_range = 49:51)
+                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 30 , property_range = c(25:39,41:57,65:77))
 ```
 
 Source-based split
@@ -1344,7 +1378,7 @@ Source-based split
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_Lab")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep")
+                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 300 , property_range = c(25:39,41:57,65:77))
 ```
 
 Cornell only Predictions (focused on pH)
@@ -1357,16 +1391,16 @@ Cornell only Predictions (focused on pH)
 
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_PCAfeat")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =500, num_bootstrap = 5) #, property_range = 50:55) 
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =10, num_bootstrap = 300 , property_range = c(25:39,41:57,65:77))
 ```
 
 \*\* Sparse Generalized Canonical Correlation Analysis (SGCCA) algorithm used in pls() modeling failed to find a stable solution within the allowed iterations.
 
 ```{r}
 
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_PCAfeat_variance")  # For RMSEP
+identifier <- initialize_workspace("PLSR_RMSEP_MI_totsplit_PCAfeat_variance")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.95) #, property_range = 50:52) 
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.95, num_bootstrap = 30 , property_range = c(25:39,41:57,65:77))
 ```
 
 #### RF Top Features as features

@@ -18,7 +18,7 @@ knitr::opts_chunk$set(echo = TRUE)
 required_packages <- c("writexl","readxl","randomForest", "caret", "pls", "data.table", "ithir", 
                        "dplyr", "tidyr", "prospectr", "globals", "stringr", 
                        "ggplot2", "here", "tidymodels", "parsnip", "plsmod", 
-                       "mixOmics", "yardstick", "purrr", "furrr", "tibble","ranger","VIM","shiny","FNN","lightgbm", "xgboost", "dials", "tune", "brnn", "recipes")
+                       "mixOmics", "yardstick", "purrr", "furrr", "tibble","ranger","VIM","shiny","FNN","lightgbm", "xgboost", "dials", "tune", "brnn", "recipes", "doParallel")
 
 #VIM for KNN imputation
 # Load all required packages quietly without outputting any list of packages
@@ -30,9 +30,24 @@ suppressPackageStartupMessages(
 conflicted::conflict_prefer("select", "dplyr")
 conflicted::conflict_prefer("filter", "dplyr")
 conflicted::conflicts_prefer(purrr::map)
-conflicted::conflicts_prefer(tune::tune)
+conflicted::conflicts_prefer(parsnip::tune)
+conflicted::conflicts_prefer(dplyr::summarise)
 
-plan(multisession)
+set.seed(345)
+
+# cores <- parallel::detectCores() - 1
+# cl <- makePSOCKcluster(cores)
+# registerDoParallel(cl)
+
+
+plan(
+  multisession,
+  workers  = parallel::detectCores() - 1
+  # tweak    = list(seed = TRUE)
+)
+
+#plan(multisession, workers = 4, tweak = list(seed = TRUE))
+options(future.seed = TRUE)
 ```
 
 ## Load reference data
@@ -56,6 +71,32 @@ rownames(spec_trt_MIR_NIR_lab) <- spec_trt_MIR_NIR_lab$SSN
 #df1<-readRDS("df1.RDS")
 df1<-readRDS("df.f.RDS")
 
+drop_vars <- c(
+  "C_tot_avg", "C_org_wt", "C_inorg_wt", "N_tot_avg_wt",
+  "H_tot_wt", "O_ult",
+  "C_tot_to_N_wt", "C_org_to_N_wt","X15N",
+  "H_tot_to_C_tot_wt", "H_tot_to_C_org_wt",
+  "Oult_to_C_tot_wt", "Oult_to_C_org_wt",
+  "Decomposition_36_month_perc_remaining", "C_Stability_perc_C",
+  "sr_02", "sr_05", "sr_2", "sr_7",
+  "Tiss_N_02", "Tiss_N_05", "Tiss_N_2", "Tiss_N_7"
+)
+
+df1 <- df1 %>% dplyr::select(-any_of(drop_vars))
+
+
+df1 <- df1 %>% 
+  mutate(
+    sum_base_cations = rowSums(
+      across(c(exchg_Ca_mmol_kg,
+               exchg_K_mmol_kg,
+               exchg_Mg_mmol_kg,
+               exchg_Na_mmol_kg,
+               exchg_P_mmol_kg)),
+      na.rm = TRUE          # treat missing values as 0
+    )
+  )
+
 # df.f: full dataset;
 # spec_trt: treated spectra
 
@@ -65,7 +106,6 @@ slprptr<-names(df1[-c(2:9)]) #FUSI EDIT: removing metadata columns
 # defining identity object with names of biochar samples
 pred<-as.data.frame(spec_trt[,1])
 colnames(pred)<-"SSN"
- 
 ```
 
 ## PLSR, RF, GBDT, BRNN Model Workflow
@@ -94,7 +134,7 @@ High-Level Structure:
 # setting up an empty tibble to accumulate performance metrics 
 initialize_workspace <- function(identifier) {
   #dir.create(paste0("Plots_Validation_MIR_", identifier), showWarnings = FALSE)
-  dir.create(paste0("Plots_WellFitted_Properties_", identifier), showWarnings = FALSE)
+  dir.create(paste0("/Volumes/Storage/CEBUM/Plots_WellFitted_Properties_", identifier), showWarnings = FALSE)
   all_metrics <<- tibble()  # Global tibble to store metrics for each property
   
   return(identifier)  # Pass the identifier for later use
@@ -141,14 +181,12 @@ select_property_data <- function(slprptr, .x, df1, spec_trt) {
 }
 ```
 
-### Defining Training/Test Split
-
-### Bootstrapped Training/Test Split
+### Defining Bootstrapped Training/Test Split
 
 ```{r}
 
 generate_bootstrap_splits <- function(df.sel, num_bootstrap, use_source = FALSE, source_name = NULL) {
-  set.seed(123)
+  #set.seed(123)
 
   # If a specific lab is selected, filter data
   if (!is.null(source_name)) {
@@ -157,7 +195,7 @@ generate_bootstrap_splits <- function(df.sel, num_bootstrap, use_source = FALSE,
 
   # Ensure we have enough samples
     # If there aren't enough samples, return NULL instead of stopping
-  if (nrow(df.sel) < 20) {
+  if (nrow(df.sel) < 30) {
     message("Skipping property due to insufficient data after filtering.")
     return(NULL)
   }
@@ -170,19 +208,26 @@ generate_bootstrap_splits <- function(df.sel, num_bootstrap, use_source = FALSE,
   }
   
   ##DEBUG
-  message("  ▶︎ Generated ", length(boot_splits$splits), " bootstraps; first split sizes: ",
-        nrow(analysis(boot_splits$splits[[1]])), "/", 
-        nrow(assessment(boot_splits$splits[[1]])))
+  #message("  ▶︎ Generated ", length(boot_splits$splits))# , " bootstraps; first split sizes: ")#,
+        #nrow(analysis(boot_splits$splits[[1]])), "/", 
+        #nrow(assessment(boot_splits$splits[[1]])))
   return(boot_splits)
   
 }
-
-
 
 # Function to split bootstrap resample into train/test
 split_bootstrap_sample <- function(boot_sample) {
   train_data <- analysis(boot_sample)
   test_data <- assessment(boot_sample)
+  
+  # Tag SSN and set rownames
+  
+    train_data <- train_data %>%
+      dplyr::mutate(SSN = paste0(SSN, "_", sprintf("%03d", row_number())))
+    test_data <- test_data %>%
+      dplyr::mutate(SSN = paste0(SSN, "_", sprintf("%03d", row_number())))
+    rownames(train_data) <- train_data$SSN
+    rownames(test_data) <- test_data$SSN
   
   #Remove Source column before model training
   train_data <- train_data %>% dplyr::select(-Source)
@@ -195,111 +240,39 @@ split_bootstrap_sample <- function(boot_sample) {
 }
 ```
 
-**NOTE: prepare_model_data and preprocess_data functions are a bit redundant ... consider combining once you solidify script**
+### Preprocess Data/ Defining Recipe
+
+New preprocess that swallows prepare
 
 ```{r}
 
-prepare_model_data <- function(boot_data, slprptr, .x) {
-  # Map over all bootstrap splits to prepare train/test data for the specific property
-  #processed_splits <- map(boot_data, function(split) {
-  safe_map <- function(x, f) {
-  tryCatch(map(x, f), error = function(e) {
-    message("Error in map() inside prepare_model_data(): ", e$message)
-    stop(e)
-  })
-}
-
-processed_splits <- safe_map(boot_data, function(split) {
+preprocess_data <- function(boot_data, slprptr, p,
+                            include_zv   = FALSE,
+                            include_pca  = FALSE,
+                            num_pca_comp = NULL,
+                            variance_threshold = NULL,
+                            include_pls = FALSE,
+                            variance_threshold_pls = NULL
+                            #forest_threshold = NULL
+                            #include_rf = FALSE
+                            ) {
+  # boot_data: list of lists with $train_data and $test_data
+  safe_map <- function(ls, fn) purrr::map(ls, ~ tryCatch(fn(.x),
+                                                          error = function(e) NULL))
   
-    train_data <- split$train_data # split refers to the index [[i]]
-    test_data <- split$test_data
- 
-    # Ensure the property exists in the dataset
-    if (!slprptr[.x] %in% colnames(train_data)) {
-      return(list(train_data = NA, test_data = NA))  # Return NA instead of stopping or returning NULL
-    }
-# 
-#     # Select relevant columns: SSN + response variable
-#     selected_cols <- c("SSN", slprptr[.x])
-#     train_data <- train_data %>% dplyr::select(all_of(selected_cols)) %>% na.omit()
-#     test_data <- test_data %>% dplyr::select(all_of(selected_cols)) %>% na.omit()
-
-    # Ensure we have enough valid data after selection
-    if (nrow(train_data) <= 10 || nrow(test_data) <= 10) {
-      return(list(train_data = NA, test_data = NA))  # Maintain NA return instead of NULL
-    }
+  #split train and test to verify they are sufficient to proceed 
+  valid_splits <- safe_map(boot_data, function(split_pair) {
+    train_data <- split_pair$train_data
+    test_data <- split_pair$test_data
     
-    # Append row number to SSN with three-digit formatting
-    train_data <- train_data %>%
-      dplyr::mutate(SSN = paste0(SSN, "_", sprintf("%03d", row_number())))
     
-    test_data <- test_data %>%
-      dplyr::mutate(SSN = paste0(SSN, "_", sprintf("%03d", row_number())))
+    # 2) Ensure response column present
+    if (!slprptr[p] %in% colnames(train_data)) return(NULL)
+    
 
-
-    # Preserve SSN as rownames
-    rownames(train_data) <- train_data$SSN
-    rownames(test_data) <- test_data$SSN
-
-    return(list(train_data = train_data, test_data = test_data))
-  })
-
-  # # Remove invalid splits (but keep as NA, not NULL)
-  # valid_splits <- map(processed_splits, function(split) {
-  #   if (is.na(split$train_data) || is.na(split$test_data)) {
-  #     return(list(train_data = NA, test_data = NA))
-  #   } else {
-  #     return(split)
-  #   }
-  # })
-  
-  valid_splits <- compact(processed_splits)
-
-  return(valid_splits)  # Return list of processed train-test pairs, ensuring all outputs are 'NA-safe'
-}
-```
-
-### Prepping Model/ Defining Recipe
-
-```{r}
-
-preprocess_data <- function(valid_splits, slprptr, p, #recipe_steps = NULL
-                            include_zv = FALSE,
-                            include_pca = FALSE,
-                            #include_pls = FALSE,
-                            #include_rf = FALSE,
-                            num_pca_comp = NULL 
-                            #variance_threshold = NULL,
-                            #variance_threshold_pls = NULL,
-                            #forest_threshold = NULL) 
-                            ){
-
-    # Use safe_map() to prevent failures in mapping
-    safe_map <- function(x, f) {
-        tryCatch(map(x, f), error = function(e) {
-            message("Error in map() inside preprocess_data(): ", e$message)
-            stop(e)
-        })
-    }
-
-    processed_splits <- safe_map(valid_splits, function(split) {
-        
-        # Ensure train and test data exist
-        if (!"train_data" %in% names(split) || !"test_data" %in% names(split)) {
-            message("🚨 Warning: Missing train/test data in this split!")
-            return(NULL)  # Explicitly return NULL so we can track it
-        }
-        
-        train_data <- split$train_data
-        test_data <- split$test_data
-        
-
-        if (nrow(train_data) == 0 || nrow(test_data) == 0) {
-            warning("⚠️ Skipping split due to empty train/test data.")
-            return(NULL)
-        }
-
-
+    
+   ## DEFINE RECIPE
+    
         formula <- as.formula(paste(slprptr[p], "~ ."))
         
         recipe_base <- recipe(formula, data = train_data) %>%
@@ -312,7 +285,7 @@ preprocess_data <- function(valid_splits, slprptr, p, #recipe_steps = NULL
 
         # # Initialize feature reduction variables
         n_comp_pca <- NA_integer_
-        #n_comp_pls <- NA_integer_
+        n_comp_pls <- NA_integer_
         #n_features_rf <- NA_integer_
 
         # =========================== PCA ===========================
@@ -375,53 +348,57 @@ preprocess_data <- function(valid_splits, slprptr, p, #recipe_steps = NULL
         }
 
         # # =========================== PLS ===========================
-        # if (include_pls) {
-        #     if (!is.null(variance_threshold_pls)) {
-        #         recipe_base <- recipe_base %>%
-        #             step_pls(all_numeric_predictors(), outcome = slprptr[p])  
-        #     } else {
-        #         max_possible_comp <- min(ncol(train_data), nrow(train_data) - 1)
-        #         temp_recipe <- recipe_base %>%
-        #             step_pls(all_numeric_predictors(), outcome = slprptr[p], num_comp = max_possible_comp)
-        # 
-        #         prepped_temp <- prep(temp_recipe, training = train_data, retain = TRUE)
-        #         pls_results <- prepped_temp$steps[[1]]$res$Xvar  
-        #         cumulative_variance <- cumsum(pls_results) / sum(pls_results)
-        # 
-        #         n_comp_pls <- which(cumulative_variance >= variance_threshold_pls)[1]
-        # 
-        #         if (!is.na(n_comp_pls) && n_comp_pls < 2) {
-        #             warning("PLS variance threshold too high, using fallback of 2 components.")
-        #             n_comp_pls <- 2
-        #         }
-        # 
-        #         recipe_base <- recipe_base %>%
-        #             step_pls(all_numeric_predictors(), outcome = slprptr[p], num_comp = n_comp_pls)
-        #     }
-        # }
+        if (include_pls) {
+            if (is.null(variance_threshold_pls)) {
+              # No threshold, use default
+                recipe_base <- recipe_base %>%
+                    step_pls(all_numeric_predictors(), outcome = slprptr[p])
+            } else {
+              # Threshold given → pick the comp count that meets it
+                max_possible_comp <- min(ncol(train_data), nrow(train_data) - 1)
+                temp_recipe <- recipe_base %>%
+                    step_pls(all_numeric_predictors(), outcome = slprptr[p], num_comp = max_possible_comp)
+
+                prepped_temp <- prep(temp_recipe, training = train_data, retain = TRUE)
+                pls_results <- prepped_temp$steps[[1]]$res$Xvar
+                cumulative_variance <- cumsum(pls_results) / sum(pls_results)
+                n_comp_pls <- which(cumulative_variance >= variance_threshold_pls)[1]
+
+                if (!is.na(n_comp_pls) && n_comp_pls < 2) {
+                    warning("PLS variance threshold too high, using fallback of 2 components.")
+                    n_comp_pls <- 2
+                }
+
+                recipe_base <- recipe_base %>%
+                    step_pls(all_numeric_predictors(), outcome = slprptr[p], num_comp = n_comp_pls)
+            }
+        }
         # 
         # # =========================== Feature Selection (RF) ===========================
         # if (include_rf && !is.null(forest_threshold)) {
         #     message("Applying step_select_forests() with threshold: ", forest_threshold)
         #     recipe_base <- recipe_base %>% step_select_forests(all_numeric_predictors(), threshold = forest_threshold)
         # }
-
-        return(list(
+    
+    
+    
+          return(list(
             recipe = recipe_base,
-            train_data = train_data,
-            test_data = test_data,
-            n_comp_pca = n_comp_pca
-            #n_comp_pls = n_comp_pls,
+            train_data = train_data, #train_data,
+            test_data = test_data, #test_data,
+            n_comp_pca = n_comp_pca,
+            n_comp_pls = n_comp_pls
             #n_features_rf = n_features_rf
         ))
     })
-
-
-    if (length(processed_splits) == 0 || all(map_lgl(processed_splits, is.null))) {
-        stop("🚨 ERROR: All processed_splits are NULL!")
-    }
-
-    return(processed_splits)
+    
+    
+      # Drop any splits that failed
+  valid_splits <- purrr::compact(valid_splits)
+  if (length(valid_splits) == 0) {
+    stop("🚨 ERROR: No valid splits after preprocess_data()!")
+  }
+  valid_splits #retuns 
 }
 ```
 
@@ -429,86 +406,8 @@ preprocess_data <- function(valid_splits, slprptr, p, #recipe_steps = NULL
 
 ```{r}
 
-# # Set up PLS or Random Forest model specification, including tuning parameters
-# setup_model <- function(model_type, preprocessed_splits, response_var = NULL) {
-#   
-#     # Extract train_data from preprocessed_splits
-#   train_data_list <- preprocessed_splits$train_data
-#   
-# 
-#   # Iterate over all bootstrap splits to set up models
-#   models <- map(train_data_list, function(train_data) {
-# 
-#     # Skip if train_data is NA
-#     if (all(is.na(train_data))) {
-#       return(list(model_spec = NA, mtry_range = NA))
-#     }
-#   
-#   
-#   
-#   if (model_type == "pls") {
-#     # Configure a PLS model specification
-#     model_spec <- parsnip::pls() %>%
-#       set_mode("regression") %>%
-#       set_engine("mixOmics") %>%
-#       set_args(num_comp = tune())
-#     mtry_range <- NULL
-#   } else if (model_type == "rf") {
-#     # Configure a Random Forest model with tuning for mtry and min_n
-#     if (is.null(train_data)) stop("train_data must be provided for Random Forest.")
-#     if (is.null(response_var)) stop("response_var must be specified for Random Forest.")
-#     
-#     # Remove SSN and response columns to get only predictor columns
-#     predictors_only <- train_data %>%
-#       dplyr::select(-SSN, -all_of(response_var))
-#         # Check if predictors are sufficient
-#     if (ncol(predictors_only) < 2) stop("Random Forest requires at least 2 predictor variables.")
-#     
-#     
-#     # Finalize mtry_range
-#     # mtry_range <- dials::finalize(dials::mtry(), predictors_only) # predictors_only is used to set the max value for the mtry range - so here mtry ranges up to the total number of predictors (e.g. number of wavenumbers).
-#     mtry_range <- dials::mtry(range = c(2, round(sqrt(ncol(predictors_only)))))
-#     
-#     if (is.null(mtry_range)) stop("Failed to initialize mtry_range in setup_model(). Check predictor columns in train_data.")
-#     
-#     model_spec <- parsnip::rand_forest(mtry = tune(), min_n = tune()) %>%
-#       set_mode("regression") %>%
-#       set_engine("ranger")
-#   } else if (model_type == "gbdt") {
-#     # Gradient-Boosted Decision Tree setup
-#     predictors_only <- train_data %>%
-#       dplyr::select(-SSN, -all_of(response_var))
-#     model_spec <- parsnip::boost_tree(
-#       trees = tune(),  # Number of trees to tune
-#       tree_depth = tune(),  # Depth of each tree
-#       learn_rate = tune(),  # Learning rate
-#       loss_reduction = tune(),  # Minimum gain for split
-#       min_n = tune(),  # Tune minimal node size
-#       #sample_size = tune(),  # Tune row sampling
-#       mtry = tune()  # Tune predictor sampling
-#     ) %>%
-#       set_mode("regression") %>%
-#       set_engine("xgboost")
-#                  #early_stopping_rounds = 10)  #
-#     mtry_range <- NULL  # Not applicable for GBDT
-#   } else if (model_type == "brnn") {
-#     model_spec <- parsnip::mlp(hidden_units = tune(), penalty = tune()) %>%
-#       set_mode("regression") %>%
-#       set_engine("nnet")
-#     mtry_range <- NULL
-#   } else {
-#     stop("Unsupported model type: ", model_type)
-#   }
-#   return(list(model_spec = model_spec, mtry_range = mtry_range))
-#   })
-# 
-#   return(models)  # Return list of models, one per bootstrap split
-# }
-```
+# Set up PLS or Random Forest model specification
 
-```{r}
-
-# Set up PLS or Random Forest model specification, including tuning parameters
 setup_model <- function(model_type, preprocessed_splits, response_var = NULL) {
   
     train_data_list <- map(preprocessed_splits, "train_data")
@@ -521,12 +420,12 @@ setup_model <- function(model_type, preprocessed_splits, response_var = NULL) {
         #  Check if train_data exists before proceeding
         if (is.null(train_data)) {
             warning("Skipping model setup due to NULL train_data.")
-            return(list(model_spec = NA, mtry_range = NA))
+            return(list(model_spec = NA)) #, mtry_range = NA))
         }
 
         if (nrow(train_data) == 0 || ncol(train_data) == 0) {
             warning("Skipping model setup due to empty train_data.")
-            return(list(model_spec = NA, mtry_range = NA))
+            return(list(model_spec = NA)) #, mtry_range = NA))
         }
     
         if (model_type == "pls") {
@@ -535,29 +434,29 @@ setup_model <- function(model_type, preprocessed_splits, response_var = NULL) {
                 set_mode("regression") %>%
                 set_engine("mixOmics") %>%
                 set_args(num_comp = tune())
-            mtry_range <- NULL
+           # mtry_range <- NULL
         } else if (model_type == "rf") {
             # Configure a Random Forest model with tuning for mtry and min_n
-            if (is.null(response_var)) stop("response_var must be specified for Random Forest.")
+            #if (is.null(response_var)) stop("response_var must be specified for Random Forest.")
             
             # Remove SSN and response columns to get only predictor columns
-            predictors_only <- train_data %>%
-                dplyr::select(-SSN, -all_of(response_var))
+           # predictors_only <- train_data %>%
+           #     dplyr::select(-SSN, -all_of(response_var))
             
-            # Check if predictors are sufficient
-            if (ncol(predictors_only) < 2) stop("Random Forest requires at least 2 predictor variables.")
-            
-            # Finalize mtry_range
-            mtry_range <- dials::mtry(range = c(2, round(sqrt(ncol(predictors_only)))))
-            if (is.null(mtry_range)) stop("Failed to initialize mtry_range in setup_model(). Check predictor columns in train_data.")
+            # # Check if predictors are sufficient
+            # if (ncol(predictors_only) < 2) stop("Random Forest requires at least 2 predictor variables.")
+            # 
+            # # Finalize mtry_range
+            # mtry_range <- dials::mtry(range = c(2, round(sqrt(ncol(predictors_only)))))
+            # if (is.null(mtry_range)) stop("Failed to initialize mtry_range in setup_model(). Check predictor columns in train_data.")
             
             model_spec <- parsnip::rand_forest(mtry = tune(), min_n = tune()) %>%
                 set_mode("regression") %>%
                 set_engine("ranger")
         } else if (model_type == "gbdt") {
             # Gradient-Boosted Decision Tree setup
-            predictors_only <- train_data %>%
-                dplyr::select(-SSN, -all_of(response_var))
+            # predictors_only <- train_data %>%
+               # dplyr::select(-SSN, -all_of(response_var))
             
             model_spec <- parsnip::boost_tree(
                 trees = tune(),  # Number of trees to tune
@@ -569,17 +468,17 @@ setup_model <- function(model_type, preprocessed_splits, response_var = NULL) {
             ) %>%
                 set_mode("regression") %>%
                 set_engine("xgboost")
-            mtry_range <- NULL  # Not applicable for GBDT
+            #mtry_range <- NULL  # Not applicable for GBDT
         } else if (model_type == "brnn") {
             model_spec <- parsnip::mlp(hidden_units = tune(), penalty = tune()) %>%
                 set_mode("regression") %>%
                 set_engine("nnet")
-            mtry_range <- NULL
+            #mtry_range <- NULL
         } else {
             stop("Unsupported model type: ", model_type)
         }
 
-        return(list(model_spec = model_spec, mtry_range = mtry_range))
+        return(list(model_spec = model_spec)) #, mtry_range = mtry_range))
     })
 
     #return(models)  # Return list of models, one per bootstrap split
@@ -604,7 +503,8 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
     return(tibble(
       Mean_R2 = NA, SD_R2 = NA, 
       Mean_RMSE = NA, SD_RMSE = NA, 
-      Mean_Bias = NA, SD_Bias = NA, 
+      Mean_Bias = NA, SD_Bias = NA,
+      Mean_MAE = NA, SD_MAE = NA,
       Property = response_var, 
       Data_Type = data_type, 
       Model = model_type
@@ -629,7 +529,7 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
     # Ensure truth and predictions are aligned
     if (length(truth) != nrow(predictions)) {
       message("Skipping metric calculation: Length mismatch between truth and predictions")
-      return(tibble(R_sq = NA, RMSE = NA, bias = NA))
+      return(tibble(R_sq = NA, MAE = NA, RMSE = NA, bias = NA))
     }
 
     # Safe computation function with error handling
@@ -643,17 +543,22 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
     rmse_value_plain <- safe_compute(rmse_vec(truth = truth, estimate = predictions$.pred))
     bias_value <- safe_compute(mean(predictions$.pred - truth, na.rm = TRUE) / mean(truth, na.rm = TRUE) * 100)
     
+    ##ADDING
+    mae_value  <- safe_compute(mae_vec(truth  = truth,
+                                   estimate = predictions$.pred))
+    
+    
       # Calculate the range of the response variable from the test_data and RMSEP/range
   response_range <- safe_compute(max(truth, na.rm = TRUE) - min(truth, na.rm = TRUE))
   
   rmse_value <- if (!is.na(response_range) && response_range > 0) rmse_value_plain / (response_range / 10) else NA
   
-    return(tibble(R_sq = r2_value, RMSE = rmse_value, bias = bias_value))
+    return(tibble(R_sq = r2_value, RMSE = rmse_value, bias = bias_value, MAE = mae_value))
   })
   
 
     # 🔍 **Remove NULL results before summarization**
-  metrics_list <- compact(metrics_list)
+  metrics_list <- purrr::compact(metrics_list)
   # Combine results and calculate mean & standard deviation across bootstrap iterations
   # Check if all iterations failed
    # Convert list of tibbles into a single tibble
@@ -670,7 +575,8 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
       Model = model_type,
       Mean_R2 = NA, SD_R2 = NA, 
       Mean_RMSE = NA, SD_RMSE = NA, 
-      Mean_Bias = NA, SD_Bias = NA 
+      Mean_Bias = NA, SD_Bias = NA,
+      Mean_MAE = NA, SD_MAE = NA
       
     ))
   }
@@ -682,7 +588,9 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
       Mean_RMSE = mean(RMSE, na.rm = TRUE),
       SD_RMSE = sd(RMSE, na.rm = TRUE),
       Mean_Bias = mean(bias, na.rm = TRUE),
-      SD_Bias = sd(bias, na.rm = TRUE)
+      SD_Bias = sd(bias, na.rm = TRUE),
+      Mean_MAE  = mean(MAE,  na.rm = TRUE),
+      SD_MAE    = sd(MAE,    na.rm = TRUE)
     ) %>%
     mutate(Property = response_var, Data_Type = data_type, Model = model_type)
 
@@ -699,9 +607,10 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
                                num_bootstrap = 50, use_source = FALSE, source_name = NULL, 
                                tuning_goal = "rmsep", property_range = 2:length(slprptr),
                                 include_zv = FALSE, 
-                                include_pca = FALSE, num_pca_comp = NULL 
-                               #variance_threshold = NULL,
-                               # include_pls = FALSE, variance_threshold_pls = NULL,
+                                include_pca = FALSE, num_pca_comp = NULL, 
+                               variance_threshold = NULL,
+                              include_pls = FALSE,
+                              variance_threshold_pls = NULL
                                # include_rf = FALSE, forest_threshold = NULL
                                ) {
 
@@ -714,9 +623,9 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
   all_metrics <- furrr::future_map_dfr(property_range, function(.x) {
     tryCatch({
       message("Processing property: ", .x, " : ", slprptr[.x])
-    
-     library(plsmod) 
-     set.seed(345)
+     
+    #library(plsmod) 
+    #set.seed(345)
 
     # Extract property-specific data 
     property_data <- select_property_data(slprptr, .x, df1, spec_trt)
@@ -726,7 +635,7 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
     # Check if there are enough observations to proceed 
     if (nrow(df.sel) <= 20) {
       message(paste("Skipping property:", slprptr[.x], "due to insufficient data"))
-      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = model_type, R_sq = NA, RMSE = NA, bias = NA, ncomp = NA))
+      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = model_type, R_sq = NA, MAE = NA, RMSE = NA, bias = NA, ncomp = NA))
     }
     
   # Generate bootstrap resamples
@@ -740,6 +649,7 @@ if (is.null(boot_splits)) {
     Data_Type = "Skipped",
     Model = model_type,
     R_sq = NA,
+    MAE = NA,
     RMSE = NA,
     bias = NA,
     ncomp = NA
@@ -757,23 +667,25 @@ if (is.null(boot_splits)) {
           # If boot_data is NULL, skip processing
     if (is.null(boot_data)) {
       message("Skipping property due to bootstrap failure: ", slprptr[.x])
-      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = model_type, R_sq = NA, RMSE = NA, bias = NA, ncomp = NA))
+      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = model_type, R_sq = NA, MAE = NA, RMSE = NA, bias = NA, ncomp = NA))
     }
 
     # Prepare bootstrap train/test splits
-    valid_splits <- prepare_model_data(boot_data, slprptr, .x)
+    # valid_splits <- prepare_model_data(boot_data, slprptr, .x)
     
-    if (is.null(valid_splits)) {
-    stop("Error: valid_splits is NULL for property ", slprptr[.x])
-    }
+    # if (is.null(valid_splits)) {
+    # stop("Error: valid_splits is NULL for property ", slprptr[.x])
+    # }
     
     
    preprocessed_splits <- tryCatch({
-    preprocess_data(valid_splits, slprptr, .x,
+    preprocess_data(boot_data, slprptr, .x,
                     include_zv = include_zv,
-                    include_pca = include_pca, num_pca_comp = num_pca_comp 
-                    # variance_threshold = variance_threshold,
-                    # include_pls = include_pls, variance_threshold_pls = variance_threshold_pls,
+                    include_pca = include_pca,
+                    num_pca_comp = num_pca_comp, 
+                    variance_threshold = variance_threshold,
+                    include_pls = include_pls,
+                    variance_threshold_pls = variance_threshold_pls
                     # include_rf = include_rf, forest_threshold = forest_threshold
                     )
 }, error = function(e) {
@@ -784,7 +696,7 @@ if (is.null(boot_splits)) {
       return(tibble(Property = slprptr[.x],
                     Data_Type = "Skipped",
                     Model = model_type,
-                    R_sq = NA, RMSE = NA, bias = NA, ncomp = NA))
+                    R_sq = NA, MAE = NA, RMSE = NA, bias = NA, ncomp = NA))
     }
 
 
@@ -804,44 +716,46 @@ if (is.null(boot_splits)) {
     #   message(paste("Skipping property:", slprptr[.x], "due to insufficient train/test data"))
     #   return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = model_type, R2 = NA, RMSE = NA, bias = NA, ncomp = NA))
     # }
-  
-    # Set up the model specification 
-    if (model_type == "pls") {
-      model_spec_list <- setup_model(model_type, preprocessed_splits, response_var = slprptr[.x])
-    } else if (model_type == "rf") {
-      model_spec_list <- setup_model(model_type, preprocessed_splits, response_var = slprptr[.x])
-    } else if (model_type == "gbdt") {
-      model_spec_list <- setup_model(model_type, preprocessed_splits, response_var = slprptr[.x])
-    } else if (model_type == "brnn") {
-      model_spec_list <- setup_model(model_type, preprocessed_splits, response_var = slprptr[.x])
+   
+       # Set up the model specification 
+    if (model_type %in% c("pls", "rf", "gbdt", "brnn")) {
+      model_spec_list <- setup_model(model_type, preprocessed_splits, response_var = slprptr[.x])$models
     } else {
       stop(paste("Unsupported model type:", model_type))
     }
    
    # Compute the global minimum PCA component count across iterations,
-# ignoring any NAs
-n_comp_pca_list <- purrr::map_dbl(preprocessed_splits, "n_comp_pca")
-#DEBUG 
-message("n_comp_pca values: ", paste(n_comp_pca_list, collapse = ", "))
-min_n_comp_pca <- min(n_comp_pca_list, na.rm = TRUE)
-min_n_comp_pca
+   if (include_pca) {
+  n_comp_pca_list <- purrr::map_dbl(preprocessed_splits, "n_comp_pca")
+  min_n_comp_pca  <- min(n_comp_pca_list, na.rm = TRUE)
+} else {
+  min_n_comp_pca <- NULL  # or however you signal “no PCA”
+}
+
+   
+# n_comp_pca_list <- purrr::map_dbl(preprocessed_splits, "n_comp_pca")
+# 
+# min_n_comp_pca <- min(n_comp_pca_list, na.rm = TRUE)
+# min_n_comp_pca
 
    
    tuned_models <- tryCatch({
      fit_model(
-  model_spec_list = map(model_spec_list$models, "model_spec"), 
+  model_spec_list = model_spec_list,
+  #model_spec_list = purr::map(model_spec_list ... over both elements)
   train_data_list = map(preprocessed_splits, "train_data"),
   test_data_list = map(preprocessed_splits, "test_data"),
   recipe_list = map(preprocessed_splits, "recipe"),
+  preprocessed_splits = preprocessed_splits,
   model_type = model_type,
   tuning_goal = tuning_goal,
   property_name = slprptr[.x],
            include_zv = include_zv,
            include_pca = include_pca,
            num_pca_comp = num_pca_comp,
-          # variance_threshold = variance_threshold,
-          # include_pls = include_pls,
-          # variance_threshold_pls = variance_threshold_pls,
+           variance_threshold = variance_threshold,
+           include_pls = include_pls,
+           variance_threshold_pls = variance_threshold_pls,
           # n_comp_pca = map(preprocessed_splits, "n_comp_pca"),
           # n_comp_pca = preprocessed_splits[[1]]$n_comp_pca
           n_comp_pca = min_n_comp_pca
@@ -914,55 +828,23 @@ min_n_comp_pca
     tibble(Property = slprptr[.x],
            Data_Type = "Skipped",
            Model = model_type,
-           R_sq = NA, RMSE = NA, bias = NA, ncomp = NA)
+           R_sq = NA, MAE = NA, RMSE = NA, bias = NA, ncomp = NA)
   })
-  
-  output_file <- paste0(output_dir, "/bootstrap_metrics_", identifier, ".xlsx")
+},
+  .options = furrr_options(seed = TRUE,
+                           packages = c(
+        "plsmod", "ranger", "dials", "tune", "workflows", "rsample", "yardstick")
+)
+  )
+    output_file <- file.path(
+    output_dir,
+    paste0("bootstrap_metrics_", identifier, ".xlsx")
+  )
   writexl::write_xlsx(all_metrics, path = output_file)
   message("Metrics saved to: ", output_file)
-})
+  
   return(all_metrics)
 
-}
-```
-
-#### Aside: Cumulative Variance for PLSR
-
-```{r}
-
-# Function to calculate cumulative explained variance
-calculate_explained_variance <- function(train_data, response_var, max_comps) {
-  # Prepare X and Y matrices
-  X <- train_data %>%
-    dplyr::select(-c(SSN, all_of(response_var))) %>%
-    dplyr::mutate(across(everything(), as.numeric)) %>%
-    as.matrix()
-  
-  Y <- train_data %>%
-    dplyr::select(all_of(response_var)) %>%
-    dplyr::mutate(across(everything(), as.numeric)) %>%
-    as.matrix()
-  
-  # Explained variance calculation
-  variance_list <- purrr::map_dbl(1:max_comps, function(num_comp) {
-    model <- tryCatch(
-      mixOmics::pls(X = X, Y = Y, ncomp = num_comp),
-      error = function(e) {
-        message("Error in fitting PLS model: ", e)
-        return(NULL)
-      }
-    )
-    
-    if (is.null(model)) {
-      return(0)
-    }
-    
-    # Calculate cumulative explained variance for X up to num_comp
-    cumulative_variance_X <- sum(model$prop_expl_var$X[1:num_comp])
-    cumulative_variance_X
-  })
-  
-  return(variance_list)
 }
 ```
 
@@ -970,304 +852,239 @@ calculate_explained_variance <- function(train_data, response_var, max_comps) {
 
 ```{r}
 
-fit_model <- function(model_spec_list, train_data_list, test_data_list, recipe_list, model_type,
-                      tuning_goal = "rmsep", cumulative_variance_threshold = 0.85, property_name = NULL,
-                       include_zv = FALSE, 
-                      # variance_threshold = NULL, 
-                       include_pca = FALSE, 
-                      # include_pls = FALSE,  
+```
+
+```{r}
+
+fit_model <- function(model_spec_list,
+                      preprocessed_splits,
+                      train_data_list,
+                      test_data_list,
+                      recipe_list,
+                      model_type,
+                      tuning_goal = "rmsep",
+                      cumulative_variance_threshold = 0.85,
+                      property_name = NULL,
+                      include_zv = FALSE,
+                      variance_threshold = NULL,
+                      include_pca = FALSE,
+                      include_pls = FALSE,
                       # n_comp_pca_variance = NULL,
-                       num_pca_comp = NULL, 
-                       n_comp_pca = NULL 
-                      # n_comp_pls = NULL, 
-                      # variance_threshold_pls = NULL, 
-                      # include_rf = FALSE, 
+                      num_pca_comp = NULL,
+                      n_comp_pca = NULL,
+                      n_comp_pls = NULL,
+                      variance_threshold_pls = NULL
+                      # include_rf = FALSE,
                       # forest_threshold = NULL
-                      ) { 
-    
+) {
+
   # Iterate over bootstrap samples
-  results_list <- map2(seq_along(train_data_list), train_data_list, function(iter, train_data) {
-    ## assigns each element of train_data_list to train_data, iterativel
-    #print(str(test_data_list))
-    #print(class(test_data_list))
-   
-    #print(head(test_data_list[[3]][1:5, 1:5]))
-    #print(head(train_data_list[[3]][1:5, 1:5]))
-    
-    test_data <- test_data_list[[iter]]
-    
-    recipe <- recipe_list[[iter]]
-    
-     # Skip if train_data or test_data is NULL
-    if (is.null(train_data) || is.null(test_data) || nrow(train_data) == 0 || nrow(test_data) == 0) {
-      message("Skipping iteration ", iter, " due to missing or empty data")
-      return(NULL)
-    }
+  results_list <- map2(
+    seq_along(train_data_list),
+    train_data_list,
+    function(iter, train_data) {
+      test_data <- test_data_list[[iter]]
+      recipe    <- recipe_list[[iter]]
 
-    model_spec <- model_spec_list[[iter]] 
-    #print(model_spec_list[[3]])
-    #View(model_spec)
-    #mtry_range <- model_spec_list[[1]]$mtry_range  # Only for RF
-##WILL CAUSE ERROR 
-    
-    # Set up workflow with recipe and model
-    biochar_workflow <- workflow() %>%
-      add_recipe(recipe) %>%
-      add_model(model_spec)
-
-    # Set default CV folds
-    set.seed(123)
-    cv_folds <- if (nrow(train_data) <= 10) {
-      vfold_cv(train_data, v = nrow(train_data))  
-    } else {
-      vfold_cv(train_data, v = 10)  
-    }
-
-    if (model_type == "pls") {
-      # Determine max_comps dynamically
-      if (isTRUE(include_pca) && !is.null(n_comp_pca)) {
-        max_comps <- min(25, nrow(train_data) - 1,  ncol(train_data), n_comp_pca)
-      } else {
-         max_comps <- min(25, nrow(test_data) - 4,  ncol(test_data))
+      # Skip if train_data or test_data is NULL or empty
+      if (is.null(train_data) ||
+          is.null(test_data) ||
+          nrow(train_data) == 0 ||
+          nrow(test_data) == 0) {
+        message("Skipping iteration ", iter, " due to missing or empty data")
+        return(NULL)
       }
-      
-        # NEW: check if max_comps is valid
-  if (max_comps < 1) {
-  message("Skipping property ", slprptr[.x], " because max_comps is less than 1.")
-  return(tibble(Property = slprptr[.x],
-                Data_Type = "Skipped",
-                Model = model_type,
-                R_sq = NA, RMSE = NA, bias = NA, ncomp = NA))
-}
 
-      if (tuning_goal == "rmsep") {
-        # Perform CV tuning for RMSEP
-        num_comp_grid <- tibble(num_comp = 1:max_comps)
-        # tune_results <- tune_grid(
-        #   biochar_workflow,
-        #   resamples = cv_folds,
-        #   grid = num_comp_grid,
-        #   metrics = metric_set(rmse),
-        #   control = control_grid(save_pred = TRUE)
-        # )
-        
-        tune_results <- tryCatch({
-  tune_grid(
-    biochar_workflow,
-    resamples = cv_folds,
-    grid = num_comp_grid,
-    metrics = metric_set(rmse),
-    control = control_grid(save_pred = TRUE)
-  )
-}, error = function(e) {
-  warning("⚠️ Error in PLS tuning: ", e$message)
-  return(NULL)
-})
+      model_spec <- model_spec_list[[iter]]$model_spec
 
-  # NEW: Check if tune_results is empty before proceeding.
-  if (is.null(tune_results) || nrow(tune_results) == 0) {
-    message("⚠️ Tuning yielded no results for property ", property_name, ". Skipping.")
-    return(list(model = NA, train_predictions = NA, test_predictions = NA, best_params = NA, test_truth = test_data))
-  }
-  
+      # Set up workflow
+      biochar_workflow <- workflow() %>%
+        add_recipe(recipe) %>%
+        add_model(model_spec)
 
-        #best_params <- tune_results %>% select_best(metric = "rmse") %>% dplyr::select(num_comp)
-          best_params <- tryCatch({
-    tune_results %>% select_best(metric = "rmse") %>% dplyr::select(num_comp)
-  }, error = function(e) {
-    warning("⚠️ select_best failed: ", e$message)
-    return(NULL)
-  })
-  
-  if (is.null(best_params) || nrow(best_params) == 0) {
-    message("⚠️ No valid best parameters found for property ", property_name, ". Skipping.")
-    return(list(model = NA, train_predictions = NA, test_predictions = NA, best_params = NA, test_truth = test_data))
-  }
-        final_workflow <- finalize_workflow(biochar_workflow, best_params)
+      # Cross‐validation splits
+      cv_folds <- if (nrow(train_data) <= 10) {
+        vfold_cv(train_data, v = nrow(train_data))
+      } else {
+        vfold_cv(train_data, v = 10)
+      }
 
-      } else if (tuning_goal == "variance") {
-        # Calculate explained variance
-        response_var <- colnames(train_data)[[2]]  # Adjust index if response var is elsewhere
-        explained_variance <- calculate_explained_variance(train_data, response_var, max_comps)
-
-        # Find min num_comp meeting variance threshold
-        num_comp <- which(explained_variance >= cumulative_variance_threshold)[1]
-        if (is.na(num_comp)) {
-          message(paste("Skipping property:", response_var, "due to insufficient cumulative variance."))
-          return(NULL)
+      if (model_type == "pls") {
+        # Determine max_comps
+        if (isTRUE(include_pca) && !is.null(n_comp_pca)) {
+          max_comps <- min(25, nrow(train_data) - 1, ncol(train_data), n_comp_pca)
+        } else {
+          max_comps <- min(25, nrow(test_data) - 4, ncol(test_data))
+        }
+        if (max_comps < 1) {
+          message("Skipping property ", slprptr[.x], " because max_comps < 1")
+          return(tibble(
+            Property  = slprptr[.x],
+            Data_Type = "Skipped",
+            Model     = model_type,
+            R_sq      = NA,
+            MAE       = NA,
+            RMSE      = NA,
+            bias      = NA,
+            ncomp     = NA
+          ))
         }
 
-        # Validate num_comp with CV
-        num_comp_grid <- tibble(num_comp = num_comp)
+        if (tuning_goal == "rmsep") {
+          num_comp_grid <- tibble(num_comp = 1:max_comps)
+          tune_results  <- tryCatch({
+            tune_grid(
+              biochar_workflow,
+              resamples = cv_folds,
+              grid      = num_comp_grid,
+              metrics   = metric_set(rmse),
+              control   = control_grid(
+                save_pred      = TRUE,
+                parallel_over  = "everything"
+              )
+            )
+          }, error = function(e) {
+            warning("⚠️ Error in PLS tuning: ", e$message)
+            return(NULL)
+          })
+          if (is.null(tune_results) || nrow(tune_results) == 0) {
+            message("⚠️ No PLS tuning results; skipping ", property_name)
+            return(list(
+              model             = NA,
+              train_predictions = NA,
+              test_predictions  = NA,
+              best_params       = NA,
+              test_truth        = test_data
+            ))
+          }
+        # Extract the best number of components from the tuning results**
+          best_params <- tune_results %>% select_best(metric = "rmse")
+          final_workflow <- finalize_workflow(biochar_workflow, best_params)
+
+        } else if (tuning_goal == "variance") {
+          response_var       <- colnames(train_data)[[2]]
+          explained_variance <- calculate_explained_variance(train_data, response_var, max_comps)
+          num_comp           <- which(cumsum(explained_variance)/sum(explained_variance) >= cumulative_variance_threshold)[1]
+          num_comp_grid      <- tibble(num_comp = num_comp)
+          tune_results       <- tune_grid(
+            biochar_workflow,
+            resamples = cv_folds,
+            grid      = num_comp_grid,
+            metrics   = metric_set(rmse),
+            control   = control_grid(
+              save_pred     = TRUE,
+              parallel_over = "everything"
+            )
+          )
+          best_params    <- tibble(num_comp = num_comp)
+          final_workflow <- finalize_workflow(biochar_workflow, best_params)
+        }
+
+      } else if (model_type == "rf") {
+        cv_folds <- vfold_cv(train_data, v = min(10, nrow(train_data) - 1))
+        response_var    <- colnames(train_data)[[2]]
+        predictors_only <- train_data %>% select(-SSN, -all_of(response_var))
+        n_feats <- if (include_pca) {
+          preprocessed_splits[[iter]]$n_comp_pca
+        } else if (include_pls) {
+          preprocessed_splits[[iter]]$n_comp_pls
+        } else {
+          ncol(predictors_only)
+        }
+        
+        rf_grid <- grid_random(
+          mtry(range = c(1, max(1, floor(sqrt(n_feats))))),
+          min_n(range = c(1, min(5, floor(nrow(train_data)/3)))),
+          size = min(nrow(train_data)/length(cv_folds$splits), 5)
+        )
+        
+        tune_results  <- tryCatch({
+          tune_grid(
+            biochar_workflow,
+            resamples = cv_folds,
+            grid      = rf_grid,
+            metrics   = metric_set(rmse),
+            control   = control_grid(
+              save_pred     = FALSE,
+              parallel_over = "everything"
+            )
+          )
+        }, error = function(e) {
+          message("❌ RF tuning error (iter ", iter, "): ", e$message)
+          NULL
+        })
+        
+        best_params    <- tune_results %>% select_best(metric = "rmse")
+        
+        final_workflow <- finalize_workflow(biochar_workflow, best_params)
+
+      } else if (model_type == "brnn") {
+        brnn_grid <- grid_random(hidden_units(range = c(1,20)),
+                                 penalty(range = c(0.001,0.1)),
+                                 size = 10)
         tune_results <- tune_grid(
           biochar_workflow,
           resamples = cv_folds,
-          grid = num_comp_grid,
-          metrics = metric_set(rmse),
-          control = control_grid(save_pred = TRUE)
+          grid      = brnn_grid,
+          metrics   = metric_set(rmse),
+          control   = control_grid(
+            save_pred     = FALSE,
+            parallel_over = "resamples"
+          )
         )
-
-        best_params <- tibble(num_comp = num_comp)
-       
+        best_params    <- tune_results %>% select_best(metric = "rmse")
         final_workflow <- finalize_workflow(biochar_workflow, best_params)
-      }
-    } else if (model_type == "rf") {
-      set.seed(123)
-      cv_folds <- vfold_cv(train_data, v = min(10, nrow(train_data) - 1))
-      
-      # Tune Random Forest model
-      rf_grid <- grid_random(
-        mtry_range,
-        min_n(range = c(1, min(5, floor(nrow(train_data) / 3)))),
-        size = min(nrow(train_data) / length(cv_folds$splits), 5)
-      )
 
-      tune_results <- tune_grid(
-        biochar_workflow,
-        resamples = cv_folds,
-        grid = rf_grid,
-        metrics = metric_set(rmse),
-        control = control_grid(save_pred = TRUE)
-      )
-
-      best_params <- tune_results %>% select_best(metric = "rmse")
-      final_workflow <- finalize_workflow(biochar_workflow, best_params)
-
-    } else if (model_type == "brnn") {
-      num_predictors <- ncol(train_data) - 2
-      max_hidden_units <- min(20, floor(log2(num_predictors)))
-
-      brnn_grid <- grid_random(
-        hidden_units(range = c(1, max_hidden_units)),
-        penalty(range = c(0.001, 0.1)),
-        size = 10
-      )
-
-      tune_results <- tune_grid(
-        biochar_workflow,
-        resamples = cv_folds,
-        grid = brnn_grid,
-        metrics = metric_set(rmse),
-        control = control_grid(save_pred = TRUE)
-      )
-
-      best_params <- tune_results %>% select_best(metric = "rmse")
-      final_workflow <- finalize_workflow(biochar_workflow, best_params)
-
-    } else if (model_type == "gbdt") {
-      set.seed(123)
-      cv_folds <- vfold_cv(train_data, v = ifelse(nrow(train_data) < 30, 5, min(10, nrow(train_data) - 1)))
-
-      gbdt_grid <- grid_random(
-        trees(range = c(50, 200)),
-        tree_depth(range = c(2, min(4, round(log2(nrow(train_data)))))),
-        learn_rate(range = c(0.005, 0.03)),
-        loss_reduction(range = c(0, 5)),
-        min_n(range = c(2, min(10, round(0.05 * nrow(train_data))))),
-        mtry(range = c(ceiling(0.05 * ncol(train_data)), min(15, floor(0.4 * ncol(train_data))))),
-        size = 10
-      )
-
-      tune_results <- tryCatch({
-        tune_grid(
+      } else if (model_type == "gbdt") {
+        gbdt_grid <- grid_random(
+          trees(range = c(50,200)),
+          tree_depth(range = c(2, round(log2(nrow(train_data))))),
+          learn_rate(range = c(0.005,0.03)),
+          loss_reduction(range = c(0,5)),
+          min_n(range = c(2, round(0.05 * nrow(train_data)))),
+          mtry(range = c(ceiling(0.05 * ncol(train_data)), floor(0.4 * ncol(train_data)))),
+          size = 10
+        )
+        tune_results  <- tune_grid(
           biochar_workflow,
           resamples = cv_folds,
-          grid = gbdt_grid,
-          metrics = metric_set(rmse),
-          control = control_grid(save_pred = TRUE)
+          grid      = gbdt_grid,
+          metrics   = metric_set(rmse),
+          control   = control_grid(
+            save_pred     = TRUE,
+            parallel_over = "resamples"
+          )
         )
-      }, error = function(e) {
-        warning("Error during GBDT tuning: ", e$message)
-        return(NULL)
-      })
+        best_params    <- tune_results %>% select_best(metric = "rmse")
+        final_workflow <- finalize_workflow(biochar_workflow, best_params)
 
-       # If tuning failed, skip
-    if (is.null(tune_results) || nrow(tune_results) == 0) {
-      message("⚠️ Skipping iteration ", iter, " due to tuning failure")
-      return(NULL)
-    }
-      
-      # Check if tune_results is valid
-if (!is.null(tune_results) && nrow(tune_results) > 0) {
-  
-  # Ensure .metrics exists and is not NULL
-  if (is.null(tune_results$.metrics) || nrow(tune_results$.metrics[[1]]) == 0) {
-    message("🚨 No valid metrics in `tune_results` for iteration ", iter, ". Skipping...")
+      } else {
+        stop("Unsupported model type: ", model_type)
+      }
+
+      # ────────────────────────────────────────────────────────────────────────
+      # Fit final model (outside the if/else chain)
+      model_fit <- fit(final_workflow, data = train_data)
+
+      train_predictions <- predict(model_fit, new_data = train_data) %>% as_tibble()
+      test_predictions  <- predict(model_fit, new_data = test_data)  %>% as_tibble()
+
+      list(
+        model             = model_fit,
+        train_predictions = train_predictions,
+        test_predictions  = test_predictions,
+        best_params       = best_params,
+        test_truth        = test_data
+      )
+    }  # ← end map2 anonymous function
+  )    # ← end map2
+
+  if (all(map_lgl(results_list, is.null))) {
+    message("🚨 All bootstrap iterations failed for property: ", property_name)
     return(NULL)
   }
 
-  
-} else {
-  message("⚠️ `tune_results` contains no valid results for iteration ", iter, ". Skipping...")
-  return(NULL)
-}
-
-      best_params <- tune_results %>% select_best(metric = "rmse")
-      
-      best_params <- tryCatch({
-  tune_results %>% select_best(metric = "rmse")
-}, error = function(e) {
-  message("⚠️ Skipping iteration ", iter, " as no best parameters could be selected")
-  return(NULL)
-})
-      # If best_params is NULL, skip this iteration
-if (is.null(best_params) || nrow(best_params) == 0) {
-  message("⚠️ No valid parameters found for iteration ", iter, ". Skipping model fitting.")
-  return(NULL)
-}
-      
-      final_workflow <- finalize_workflow(biochar_workflow, best_params)
-    }
-
-    # Fit final model
-   # model_fit <- fit(final_workflow, data = train_data)
-    
-        # Try-Catch for model fitting
-    model_fit <- tryCatch({
-      fit(final_workflow, data = train_data)
-    }, error = function(e) {
-      message("🚨 Model fitting failed for iteration ", iter, ": ", e$message)
-      return(NULL)
-    })
-    
-      if (is.null(model_fit)) {
-      return(NULL)
-    }
-
-    # Generate predictions for train and test sets
-    train_predictions <- tryCatch({
-      predict(model_fit, new_data = train_data) %>%
-        as_tibble()
-    }, error = function(e) {
-      message("Error in train_predictions: ", e)
-      return(NULL)
-    })
-    
-
-    test_predictions <- tryCatch({
-      predict(model_fit, new_data = test_data) %>%
-        as_tibble()
-    }, error = function(e) {
-      message("Error in test_predictions: ", e)
-      return(NULL)
-    })
-
-    return(list(
-      model = model_fit,
-      train_predictions = train_predictions,
-      test_predictions = test_predictions,
-      best_params = best_params,
-      test_truth = test_data  # Store actual test response values
-
-    ))
-  })
-  
-  if (all(map_lgl(results_list, is.null))) {  
-  message("🚨 All bootstrap iterations failed for property: ", property_name, ". Skipping model training.")
-  return(NULL)  # Return NULL to indicate failure
-  }
-  return(results_list)  # Return results for all bootstrap iterations
-
+  results_list
 }
 ```
 
@@ -1284,7 +1101,8 @@ Total split
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 300, property_range = c(25:39,41:57,65:77))
+                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 2, property_range = 25)# :39,41:72, 87,102))
+
 ```
 
 Source-based split
@@ -1294,7 +1112,7 @@ Source-based split
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 300 , property_range = c(25:39,41:57,65:77))
+                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 Cornell only Predictions (focused on pH)
@@ -1304,7 +1122,7 @@ Cornell only Predictions (focused on pH)
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_CornellOnlysplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 300 , property_range = c(25:39,41:57,65:77))
+                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 #### Tune to minimize RMSEP - MIR 80/20 Split
@@ -1368,7 +1186,7 @@ Total split
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_Lab")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 30 , property_range = c(25:39,41:57,65:77))
+                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 Source-based split
@@ -1378,7 +1196,7 @@ Source-based split
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_Lab")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 300 , property_range = c(25:39,41:57,65:77))
+                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 Cornell only Predictions (focused on pH)
@@ -1391,7 +1209,7 @@ Cornell only Predictions (focused on pH)
 
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_PCAfeat")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =10, num_bootstrap = 300 , property_range = c(25:39,41:57,65:77))
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =10, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 \*\* Sparse Generalized Canonical Correlation Analysis (SGCCA) algorithm used in pls() modeling failed to find a stable solution within the allowed iterations.
@@ -1400,7 +1218,7 @@ run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
 
 identifier <- initialize_workspace("PLSR_RMSEP_MI_totsplit_PCAfeat_variance")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.95, num_bootstrap = 30 , property_range = c(25:39,41:57,65:77))
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.95, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 #### RF Top Features as features
@@ -1430,7 +1248,7 @@ Total split - NIR
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_NIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep")
+                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 50) #, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 Source-based split - NIR
@@ -1440,7 +1258,7 @@ Source-based split - NIR
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_NIR_sourcesplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep")#, property_range = 3:4)
+                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 Cornell only Predictions - NIR
@@ -1450,7 +1268,7 @@ Cornell only Predictions - NIR
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_NIR_CornellOnlysplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", property_range = 59:60)
+                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 #### Tune to minimize RMSEP - MIR + NIR
@@ -1462,7 +1280,7 @@ Total split - MIR + NIR
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep")
+                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 Source-based split - MIR + NIR
@@ -1472,7 +1290,7 @@ Source-based split - MIR + NIR
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_sourcesplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep")
+                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 Cornell only Predictions - MIR + NIR
@@ -1482,7 +1300,7 @@ Cornell only Predictions - MIR + NIR
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_CornellOnlysplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep")
+                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 #### Lab Covariate - MIR + NIR
@@ -1494,7 +1312,7 @@ Total split - MIR + NIR
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_totsplit_Lab")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
+                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 Source-based split - MIR + NIR
@@ -1504,7 +1322,7 @@ Source-based split - MIR + NIR
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_sourcesplit_Lab")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep")
+                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 Cornell only Predictions - MIR + NIR
@@ -1519,20 +1337,22 @@ Cornell only Predictions - MIR + NIR
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", property_range = 49:51)
+                   use_source = FALSE, tuning_goal = "rmsep",
+                   num_bootstrap = 50)#, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 ```{r}
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
+                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 ```{r}
 identifier <- initialize_workspace("RF_RMSEP_MIR_CornellOnlysplit_99perc")  # For RMSEP
+
 run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep") #,property_range = 25:55)
+                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 
 ```
 
@@ -1565,17 +1385,19 @@ run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_lab")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
+                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 ```{r}
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_lab")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
+                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 #### No Zero Variance - MIR
+
+(not really needed for tree based models)
 
 -   Identifies **columns (wavenumbers) where all values are identical** (e.g., every row has 0.5 at a certain wavenumber). These predictors provide **no information** because their standard deviation is **zero**.
 
@@ -1583,38 +1405,37 @@ run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_zv")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 59:63)
+                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE, num_bootstrap = 30, property_range =c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
+# identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_zv")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
+#                    use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_CornellOnlysplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-
+# identifier <- initialize_workspace("RF_RMSEP_MIR_CornellOnlysplit_zv")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
+#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", include_zv = TRUE, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 #### Lab Covariate & No Zero Variance- MIR
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
+# identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_lab")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,  
+#                    use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
+# identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_lab")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,
+#                    use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 #### PCA Components as features
@@ -1625,7 +1446,7 @@ Number of components
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_PCAfeat")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =20) #, property_range = 58:65) ˆ
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =20, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 Captured variance
@@ -1634,7 +1455,7 @@ Captured variance
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_PCAfeat_Var")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.95) #, property_range = 39:41 ) #property_range = 49:51,
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.99, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 #### PLSR Components as features
@@ -1643,7 +1464,7 @@ run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_totspslit_PLSfeat_RMSEP")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep", include_pls = TRUE) #, property_range = 2:5) 
+                   use_source = FALSE, tuning_goal = "rmsep", include_pls = TRUE, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 ```{r}
@@ -1664,15 +1485,13 @@ run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
                    use_source = FALSE, tuning_goal = "rmsep", include_rf = TRUE, forest_threshold = 0.02) #, property_range = 2:5) 
 ```
 
-#### 
-
 #### (Cont. from here 13/02/2025) Tune to minimize RMSEP - NIR
 
 ```{r}
 
 identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_99perc")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
+                   use_source = FALSE, tuning_goal = "rmsep",num_bootstrap = 50)#, property_range = 49:51)
 ```
 
 ```{r}
@@ -1709,23 +1528,23 @@ run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
+# identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_zv")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,  
+#                    use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
 ```
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
+# identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_zv")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
+#                    use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
 ```
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_NIR_CornellOnlysplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
+# identifier <- initialize_workspace("RF_RMSEP_NIR_CornellOnlysplit_zv")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
+#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
 
 ```
 
@@ -1733,16 +1552,16 @@ run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
+# identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_lab")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier,  
+#                    use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
 ```
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
+# identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_lab")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier,
+#                    use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
 ```
 
 #### Tune to minimize RMSEP - MIR + NIR
@@ -1793,39 +1612,39 @@ run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "rf", identi
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
+# identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_zv")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,  
+#                    use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
 ```
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
+# identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_zv")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
+#                    use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
 ```
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_CornellOnlysplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
+# identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_CornellOnlysplit_zv")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
+#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
 ```
 
 #### Lab Covariate & No Zero Varaiance - MIR + NIR
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
+# identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_lab")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "rf", identifier,  
+#                    use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
 ```
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
+# identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_lab")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "rf", identifier,
+#                    use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
 ```
 
 ## GBDT
@@ -2135,4 +1954,10 @@ run_all_properties(
 )
 ```
 
-#### 
+## Stop R workers
+
+Stop running the separate R processes (in parallel)
+
+```{r}
+#stopCluster(cl)
+```

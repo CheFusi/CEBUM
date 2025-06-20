@@ -1,0 +1,738 @@
+---
+title: "Biochar_EA"
+output: html_document
+date: "2025-03-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Libraries
+
+```{r}
+
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggpmisc)  # For equation annotation
+library(purrr)
+library(readr)
+library(tidyverse)
+library(viridis)
+library(ggthemes)
+library(RColorBrewer)
+library(ggplot2)
+library(patchwork)
+
+conflicted::conflicts_prefer(ggplot2::annotate)
+conflicted::conflicts_prefer(ggplot2::margin)
+```
+
+## Load Data
+
+```{r}
+
+# Load the Excel file
+data <- read_excel("../Elemental_Analyzer/Blank_C_tot_Combined/Fusi_Blank_Cal_Test_w_Blank_Default_25_03_25.xlsx", sheet = 1)
+
+# Remove spaces within numeric values and convert to numeric
+data <- data %>%
+  mutate(across(c(Weight_mg, C_Area, H_Area, N_Area), ~as.numeric(gsub(" ", "", as.character(.)))))
+
+```
+
+```{r}
+
+# Filter for calibration samples
+data_cal <- data %>%
+  filter(grepl("Fusi_Acetanilide", Name)) %>%
+  select(Name, Weight_mg, C_Area, H_Area, N_Area)
+
+# Known composition of Acetanilide
+known_percent <- c(C = 71.09, H = 6.71, N = 10.36) / 100
+
+# Compute absolute elemental content in mg
+data_cal <- data_cal %>%
+  mutate(
+    C_mg = Weight_mg * known_percent["C"],
+    H_mg = Weight_mg * known_percent["H"],
+    N_mg = Weight_mg * known_percent["N"]
+  )
+
+# Function to compute r^2 manually
+compute_r2 <- function(x, y) {
+  n <- length(x)
+  num <- (sum(x * y) - (sum(x) * sum(y) / n))^2
+  denom <- (sum(x^2) - (sum(x)^2 / n)) * (sum(y^2) - (sum(y)^2 / n))
+  return(num / denom)
+}
+```
+
+```{r}
+
+# Function to create calibration plot with correlation coefficient
+plot_calibration <- function(df, element) {
+  x_col <- paste0(element, "_Area")
+  y_col <- paste0(element, "_mg")
+  
+  # Fit linear and polynomial models
+  lin_model <- lm(reformulate(x_col, y_col), data = df)
+  poly_model <- lm(reformulate(paste0("poly(`", x_col, "`, 2)"), y_col), data = df)
+  
+  # Compute r-squared values
+  r2_lin <- compute_r2(df[[x_col]], df[[y_col]])  # Compute r-squared manually, based on manual
+  r2_poly <- summary(poly_model)$r.squared
+  
+  # Extract equations
+  # lin_eq <- as.character(as.expression(
+  #   substitute(italic(y) == a + b * italic(x) * "," ~ italic(R)^2 ~ "=" ~ r2,
+  #              list(a = round(coef(lin_model)[1], 4), 
+  #                   b = round(coef(lin_model)[2], 4),
+  #                   r2 = round(r2_lin, 4)))))
+  # 
+  # poly_eq <- as.character(as.expression(
+  #   substitute(italic(y) == a + b * italic(x) + c * italic(x)^2 * "," ~ italic(R)^2 ~ "=" ~ r2,
+  #              list(a = round(coef(poly_model)[1], 4), 
+  #                   b = round(coef(poly_model)[2], 4), 
+  #                   c = round(coef(poly_model)[3], 4),
+  #                   r2 = round(r2_poly, 4)))))
+# Build plain text labels
+lin_eq <- paste0(
+  "y = ", round(coef(lin_model)[1], 4), 
+  " + ", round(coef(lin_model)[2], 6), "·x",
+  ",  R² = ", round(r2_lin, 4)
+)
+
+poly_eq <- paste0(
+  "y = ", round(coef(poly_model)[1], 4), 
+  " + ", round(coef(poly_model)[2], 4), "·x",
+  " + ", round(coef(poly_model)[3], 6), "·x²",
+  ",  R² = ", round(r2_poly, 4)
+)
+  
+  # Plot
+# Plot
+ggplot(df, aes_string(x = x_col, y = y_col)) +
+  geom_point(size = 4, color = "#D55E00") +  # Burnt orange
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "#E69F00", linetype = "dashed", size = 1.2) +  # Goldenrod
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE, color = "#009E73", size = 1.2) +  # Deep green
+  labs(
+    title = paste("Calibration Curve for", element),
+    x = paste(element, "Peak Area"),
+    y = paste("Absolute", element, "Content (mg)")
+  ) +
+  theme(
+    panel.background = element_rect(fill = "white", color = "black", size = 1),  # Black border
+    panel.grid = element_blank(),  # No gridlines
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),  # Centered, bold title
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12)
+  ) +
+  annotate("text", x = min(df[[x_col]]), y = max(df[[y_col]]) * 1.03, 
+           label = lin_eq, hjust = 0, color = "#E69F00", size = 5) +
+  annotate("text", x = min(df[[x_col]]), y = max(df[[y_col]]) * 0.9, 
+           label = poly_eq, hjust = 0, color = "#009E73", size = 5)
+}
+
+```
+
+Plot Calibration
+
+```{r}
+
+# Generate plots
+plot_C <- plot_calibration(data_cal, "C")
+plot_H <- plot_calibration(data_cal, "H")
+plot_N <- plot_calibration(data_cal, "N")
+
+# Display plots
+print(plot_C)
+print(plot_H)
+print(plot_N)
+
+```
+
+Calc Elemental %'s and Compare to El Vario
+
+```{r}
+
+# Function to calculate CHN % for new data using linear calibration
+calculate_CHN_percent <- function(new_data, lin_models) {
+  new_data <- new_data %>%
+    mutate(
+      C_mg_pred = predict(lin_models$C, new_data),
+      H_mg_pred = predict(lin_models$H, new_data),
+      N_mg_pred = predict(lin_models$N, new_data),
+      
+      C_percent_pred = (C_mg_pred / Weight_mg) * 100,
+      H_percent_pred = (H_mg_pred / Weight_mg) * 100,
+      N_percent_pred = (N_mg_pred / Weight_mg) * 100
+    )
+  return(new_data)
+}
+
+# Fit linear models for calibration
+lin_models <- list(
+  C = lm(C_mg ~ C_Area, data = data_cal),
+  H = lm(H_mg ~ H_Area, data = data_cal),
+  N = lm(N_mg ~ N_Area, data = data_cal)
+)
+
+# Load new data
+new_data <- read_excel("../Elemental_Analyzer/Blank_C_tot_Combined/Fusi_Blank_Cal_Test_w_Blank_Default_25_03_25.xlsx", sheet = 1) %>%
+  mutate(across(c(Weight_mg, C_Area, H_Area, N_Area), ~as.numeric(gsub(" ", "", as.character(.)))))
+
+# Apply calibration model
+new_data <- calculate_CHN_percent(new_data, lin_models)
+
+# Compare calculated CHN % to provided CHN %
+comparison <- new_data %>%
+  select(Name, C_percent_pred, H_percent_pred, N_percent_pred, 'C_%', 'H_%', 'N_%')
+
+print(comparison)
+
+```
+
+```{r}
+
+known_percent_mix <- data.frame(theoretical = c(8.129187,
+                                                0.080000,
+                                                0.040000,
+                                                2.322774,
+                                                0.027052,
+                                                0.016298),
+                                name_column = c("8.14N",
+                                                "0.08N",
+                                                "0.04N",
+                                                "2.32N",
+                                                "0.027N",
+                                                "0.016N")
+)
+
+
+```
+
+#### Second Calibration Curve from Mix Standards
+
+```{r}
+
+# Load second sheet
+mix_data <- read_excel("../Elemental_Analyzer/Blank_C_tot_Combined/Fusi_Blank_Cal_Test_w_Blank_Default_25_03_25.xlsx", sheet = 2)
+
+# Ensure numeric and cleaned format for relevant columns
+mix_data <- mix_data %>%
+  mutate(across(c(Weight_mg, N_Area), ~as.numeric(gsub(" ", "", as.character(.)))))
+
+# Merge mix_data with known_percent_mix to add theoretical N%
+mix_data_filtered <- mix_data %>%
+  filter(Name %in% known_percent_mix$name_column) %>%
+  left_join(known_percent_mix, by = c("Name" = "name_column"))
+
+# Calculate expected nitrogen mass in mg
+mix_data_filtered <- mix_data_filtered %>%
+  mutate(N_mg = Weight_mg * theoretical/100)
+
+# Reuse plot_calibration function for nitrogen only
+plot_mix_N <- plot_calibration(mix_data_filtered, "N")
+
+# ——— 1) Fit your linear calibration on the mix_data_filtered you already built ———
+cal_mod <- lm(N_mg ~ N_Area, data = mix_data_filtered)
+
+# pull out intercept (a) and slope (b)
+a <- as.numeric(coef(cal_mod)[1])
+b <- as.numeric(coef(cal_mod)[2])
+
+
+# Display the plot
+print(plot_mix_N)
+
+```
+
+## Correcting for Daily Factor
+
+```{r}
+
+CHN_All <- read_excel("../Elemental_Analyzer/Blank_C_tot_Combined/2025_04_18_8393_8408_Ctot.xlsx", sheet = 1)
+
+
+```
+
+Correct sample IDW
+
+```{r}
+
+df_ssn <- CHN_All %>%
+  mutate(
+    SSN = if_else(
+      grepl("^8\\d{3}$", Name),
+      paste0("WA07", Name),
+      Name
+    ),
+    Date_Time = as.POSIXct(Date_Time,
+                           format = "%d.%m.%Y %H:%M",
+                           tz = "UTC")
+  ) %>%
+  select(-Name)
+
+df_ssn <- df_ssn %>%
+  mutate(
+    C_Area = as.numeric(gsub(" ", "", C_Area)),
+    H_Area = as.numeric(gsub(" ", "", H_Area)),
+    N_Area = as.numeric(gsub(" ", "", N_Area))
+  )
+
+# ——— 2) Apply to your df_ssn which has N_Area & Weight_mg) ———
+df_ssn <- df_ssn %>%
+  mutate(
+    # predicted N mass in mg from area
+    N_mg_corrected     = a + b * N_Area,
+    # convert to percent of the char mass
+    N_pct_corrected    = (N_mg_corrected / Weight_mg)
+  )
+```
+
+```{r}
+
+# 2) Extract your bracket standards once
+df_graphite <- df_ssn %>%
+  filter(SSN == "graphite") %>%
+  arrange(Date_Time) %>%
+  select(Date_Time, C_obs = `C_%`, H_obs = `H_%`)
+
+df_apcs5 <- df_ssn %>%
+  filter(SSN == "APCS5") %>%
+  arrange(Date_Time) %>%
+  select(Date_Time, C_obs = `C_%`, H_obs = `H_%`)
+
+# 3) Function to compute the before/after factor
+get_bracket_factor <- function(times, obs, samp_time, true_val) {
+  # find all candidate indices
+  prev_idx <- which(times <= samp_time)
+  next_idx <- which(times >= samp_time)
+
+  # compute the “before” factor (or NA if no before)
+  if (length(prev_idx) > 0) {
+    obs_prev <- obs[max(prev_idx)]
+    f_prev   <- if (obs_prev == 0) 1 else true_val / obs_prev
+  } else {
+    f_prev <- NA_real_
+  }
+
+  # compute the “after” factor (or NA if no after)
+  if (length(next_idx) > 0) {
+    obs_next <- obs[min(next_idx)]
+    f_next   <- if (obs_next == 0) 1 else true_val / obs_next
+  } else {
+    f_next <- NA_real_
+  }
+
+  # average whichever we have (or return 1 if both are NA)
+  facs <- c(f_prev, f_next)
+  facs <- facs[!is.na(facs)]
+  if (length(facs) == 0) return(1)
+  mean(facs)
+}
+
+# 4) Apply corrections to every row
+df_corrected <- df_ssn %>%
+  rowwise() %>%
+  mutate(
+    # graphite true values
+    f_g_C = get_bracket_factor(df_graphite$Date_Time, df_graphite$C_obs,
+                               Date_Time, 99),
+    f_g_H = get_bracket_factor(df_graphite$Date_Time, df_graphite$H_obs,
+                               Date_Time, 0.5),
+    # APCS5 true values
+    f_a_C = get_bracket_factor(df_apcs5$Date_Time, df_apcs5$C_obs,
+                               Date_Time, 91.8),
+    f_a_H = get_bracket_factor(df_apcs5$Date_Time, df_apcs5$H_obs,
+                               Date_Time, 4.5),
+    # combined
+    f_C = mean(c(f_g_C, f_a_C), na.rm = TRUE),
+    f_H = mean(c(f_g_H, f_a_H), na.rm = TRUE),
+    # corrected percentages
+    C_corrected = `C_%` * f_C,
+    H_corrected = `H_%` * f_H
+  ) %>%
+  ungroup()
+
+
+
+# 5) Now collapse replicates into one row per SSN
+df_final <- df_corrected %>%
+  group_by(SSN) %>%
+  summarise(
+    across(
+      c(C_corrected, H_corrected,N_pct_corrected, where(is.numeric)),
+      ~ mean(.x, na.rm = TRUE)
+    ),
+    Date_Time = dplyr::first(Date_Time),
+    .groups = "drop"
+  )%>%
+  # now convert from % → fraction
+  mutate(
+    C_corrected = C_corrected / 100 / 12.011,
+    H_corrected = H_corrected / 100 / 1.008,
+    N_corrected   = N_pct_corrected / 14.007
+  )
+```
+
+### Organic C
+
+```{r}
+
+
+# 1) Read & bind all xlsx files in your folder
+files <- list.files("../Elemental_Analyzer/Separate_Files", pattern = "\\.xlsx$", full.names = TRUE)
+
+df_new <- map_dfr(files, ~ read_excel(.x))   # assumes data are all on the first/default sheet
+
+# 2) Clean up area columns and parse Date_Time
+df_new <- df_new %>%
+  mutate(
+    C_Area    = parse_number(C_Area),
+    Date_Time = as.POSIXct(Date_Time,
+                           format = "%d.%m.%Y %H:%M",
+                           tz     = "UTC")
+  )
+
+# 3) Pull out your graphite & APCS5 time‐series for C
+df_graphite <- df_new %>%
+  filter(Name == "graphite") %>%
+  arrange(Date_Time) %>%
+  select(Date_Time, C_obs = `C_%`)
+
+df_apcs5 <- df_new %>%
+  filter(Name == "APCS5") %>%
+  arrange(Date_Time) %>%
+  select(Date_Time, C_obs = `C_%`)
+
+# 4) Bracket‐factor function (C only)
+get_bracket_factor <- function(times, obs, samp_time, true_val) {
+  # find before & after indices
+  prev_idx <- which(times <= samp_time)
+  next_idx <- which(times >= samp_time)
+  
+  f_prev <- if (length(prev_idx)>0) {
+    o <- obs[max(prev_idx)]
+    if (o==0) 1 else true_val / o
+  } else NA_real_
+  
+  f_next <- if (length(next_idx)>0) {
+    o <- obs[min(next_idx)]
+    if (o==0) 1 else true_val / o
+  } else NA_real_
+  
+  facs <- na.omit(c(f_prev, f_next))
+  if (length(facs)==0) return(1)
+  mean(facs)
+}
+
+# 5) Apply C‐correction to all rows
+df_corr <- df_new %>%
+  rowwise() %>%
+  mutate(
+    f_g_C      = get_bracket_factor(df_graphite$Date_Time, df_graphite$C_obs,
+                                    Date_Time, 99),
+    f_a_C      = get_bracket_factor(df_apcs5$Date_Time,   df_apcs5$C_obs,
+                                    Date_Time, 91.8),
+    f_C        = mean(c(f_g_C, f_a_C), na.rm = TRUE),
+    C_corrected = `C_%` * f_C
+  ) %>%
+  ungroup()
+
+# 6) Extract only the “four-digits + o” samples, rename SSN, and average replicates
+df_o <- df_corr %>%
+  filter(grepl("^\\d{4}o$", Name)) %>%
+  mutate(
+    SSN = paste0("WA07", substr(Name, 1, 4))
+  ) %>%
+  group_by(SSN) %>%
+  summarise(
+    C_org_corrected = mean(C_corrected, na.rm = TRUE)/ 100/ 12.011,
+    #Date_Time       = first(Date_Time),
+    .groups = "drop"
+  )
+
+# 7) Merge onto your existing df_final by SSN
+df_EA <- df_final %>%
+  left_join(df_o, by = "SSN")
+
+```
+
+Compare with Collab
+
+```{r}
+
+
+# 1) Load your collaborator data
+df1 <- readRDS("df.f.RDS")
+
+# 3) Select only the collaborator C & H columns, rename for clarity
+df1_subset <- df1 %>%
+  select(
+    SSN,
+    C_collab = C_tot_molar,
+    H_collab = H_tot_molar,
+    N_collab = N_molar,
+    Corg_collab = C_org_molar
+  )
+
+# 4) Join with your corrected/averaged data (named here df_final)
+#    (make sure df_final has SSN, C_corrected, H_corrected)
+df_combined <- df1_subset %>%
+  inner_join(df_EA, by = "SSN")
+
+# 5) Plot C
+
+
+ggplot(df_combined, aes(x = C_org_corrected , y = Corg_collab )) + 
+  geom_point() +
+  # geom_text(aes(label = SSN),
+  #           vjust = -0.5,      # nudge text up
+  #           size  = 3) +       # adjust text size
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(
+    x     = "Corrected Corg (%)",
+    y     = "Collaborator Corg (%)"
+    #title = "Collaborator vs. Corrected Hydrogen"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+
+# a little helper so you don’t repeat yourself
+common_theme <- theme_classic() +
+  theme(
+    panel.grid    = element_blank(),             # no grid lines
+    panel.border  = element_rect(color = "black", fill = NA, size = 0.5),  
+    plot.title    = element_blank()              # drop any title
+  )
+
+# Corrected vs. collaborator C
+C_labs_plot <- ggplot(df_combined, aes(x = C_corrected, y = C_collab)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(
+    x = "C (mol) ",
+    y = " C labs"
+  ) +
+  common_theme
+
+# Corrected vs. collaborator H
+H_labs_plot <- ggplot(df_combined, aes(x = H_corrected, y = H_collab)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(
+    x = "H (mol)",
+    y = "H labs"
+  ) +
+  common_theme
+
+# Corrected vs. collaborator N
+N_labs_plot <- ggplot(df_combined, aes(x = N_corrected, y = N_collab)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(
+    x = "N (mol)",
+    y = "N labs"
+  ) +
+  common_theme
+
+N_labs_plot
+H_labs_plot
+C_labs_plot
+```
+
+```{r}
+
+ #Test <- df_o %>%  select(SSN, "C_%", C_corrected)
+ 
+ #plot(Test$"C_%", Test$C_corrected)
+```
+
+Save
+
+```{r}
+
+
+#saveRDS(df_combined,"Cornell_CHN.RDS")
+
+# 1) select just the SSN + the four corrected cols
+df_corr_cols <- df_combined %>%
+  select(SSN, N_corrected, C_org_corrected, C_corrected, H_corrected)
+
+# 2) merge onto df1
+df2 <- df1 %>%
+  left_join(df_corr_cols, by = "SSN")
+rownames(df2)<-df2$SSN
+
+df2 <- df2 %>%
+  rename(
+    N_onelab      = N_corrected,
+    C_org_onelab  = C_org_corrected,
+    C_onelab      = C_corrected,
+    H_onelab      = H_corrected
+  )
+
+saveRDS(df2,"df2_CHN.RDS")
+
+# 3) write out to an xlsx
+write_xlsx(df2, "df2.xlsx")
+```
+
+### Comparative P*lots*
+
+```{r}
+
+# Function to generate Bland-Altman plots
+plot_bland_altman <- function(data, corrected_col, reference_col, label) {
+  df_ba <- data %>%
+    filter(!is.na(.data[[corrected_col]]), !is.na(.data[[reference_col]])) %>%
+    mutate(
+      avg  = (.data[[corrected_col]] + .data[[reference_col]]) / 2,
+      diff = .data[[corrected_col]] - .data[[reference_col]]
+    )
+
+  mean_diff <- mean(df_ba$diff, na.rm = TRUE)
+  sd_diff   <- sd(df_ba$diff, na.rm = TRUE)
+  upper     <- mean_diff + 1.96 * sd_diff
+  lower     <- mean_diff - 1.96 * sd_diff
+
+  ggplot(df_ba, aes(x = avg, y = diff)) + #, color = Primary.Class
+    geom_point(size = 2.5, alpha = 0.99) +
+    geom_hline(yintercept = mean_diff, color = "black", size = 0.5) +
+    geom_hline(yintercept = upper, color = "black", linetype = "dashed") +
+    geom_hline(yintercept = lower, color = "black", linetype = "dashed") +
+    #scale_color_manual(values = qualitative_hcl(n = 12, 
+                                #palette = "Dark 2")) +
+    labs(
+      #title = glue::glue("Bland-Altman Plot for {label}"),
+      x = glue::glue("Average of {label}"),
+      y = glue::glue("Difference {label}")#,
+      #color = "Primary Class"
+    ) +
+theme_classic(base_size = 12) +
+  theme(
+    panel.border    = element_rect(color = "black", fill = NA, linewidth = 0.6),  # bounding box
+    panel.grid      = element_blank(),  # remove grid lines
+    axis.line       = element_line(color = "black"),
+    plot.title      = element_text(face = "bold", size = 14),
+    axis.title      = element_text(size = 12),
+    axis.text       = element_text(size = 11),
+    legend.position = "right",
+    legend.title    = element_text(size = 10),
+    legend.text     = element_text(size = 9),
+    legend.key      = element_blank(),  # no background behind legend keys
+    plot.margin     = margin(10, 10, 10, 10)
+  )
+}
+
+# Call for each element
+plot_bland_altman(df2, "C_onelab", "C_tot_molar", "Carbon")
+plot_bland_altman(df2, "N_onelab", "N_molar", "Nitrogen")
+plot_bland_altman(df2, "H_onelab", "H_tot_wt", "Hydrogen")
+```
+
+#### Density Plot
+
+```{r}
+
+
+# Plot for Carbon
+p_c <- ggplot(df2, aes(x = C_tot_molar)) +
+  geom_density(aes(fill = "multilab"), alpha = 0.5) +
+  geom_density(aes(x = C_onelab, fill = "One-lab"), alpha = 0.5) +
+  scale_fill_manual(values = c("multilab" = "#BF812D", "One-lab" = "#35978F")) +
+  labs(title = "Carbon Distribution", x = "C mol", fill = "Source") +
+  theme_minimal(base_size = 8)+
+  theme(
+    panel.border    = element_rect(color = "black", fill = NA, linewidth = 0.6),  # bounding box
+    panel.grid      = element_blank())  # remove grid lines
+
+# Nitrogen
+p_n <- ggplot(df2, aes(x = N_molar)) +
+  geom_density(aes(fill = "multilab"), alpha = 0.5) +
+  geom_density(aes(x = N_onelab, fill = "One-lab"), alpha = 0.5) +
+  scale_fill_manual(values = c("multilab" = "#BF812D", "One-lab" = "#35978F")) +
+  labs(title = "Nitrogen Distribution", x = "N mol", fill = "Source") +
+  theme_minimal(base_size = 8)+
+  theme(
+    panel.border    = element_rect(color = "black", fill = NA, linewidth = 0.6),  # bounding box
+    panel.grid      = element_blank())
+
+# Hydrogen
+p_h <- ggplot(df2, aes(x = H_tot_wt)) +
+  geom_density(aes(fill = "multilab"), alpha = 0.5) +
+  geom_density(aes(x = H_onelab, fill = "One-lab"), alpha = 0.5) +
+  scale_fill_manual(values = c("multilab" = "#BF812D", "One-lab" = "#35978F")) +
+  labs(title = "Hydrogen Distribution", x = "H mol", fill = "Source") +
+  theme_minimal(base_size = 8)+
+  theme(
+    panel.border    = element_rect(color = "black", fill = NA, linewidth = 0.6),  # bounding box
+    panel.grid      = element_blank())
+
+# Combine into one figure
+p_c / p_n / p_h
+```
+
+#### Kolmogorov–Smirnov (K–S) statistic
+
+```{r}
+
+# K–S tests
+ks.test(df2$C_onelab, df2$C_tot_molar)
+ks.test(df2$N_onelab, df2$N_molar)
+ks.test(df2$H_onelab, df2$H_tot_wt)
+
+# Summary statistics
+summary_stats <- df2 %>%
+  summarise(
+    C_onelab_mean = mean(C_onelab, na.rm = TRUE),
+    C_tot_molar_mean = mean(C_tot_molar, na.rm = TRUE),
+    N_onelab_mean = mean(N_onelab, na.rm = TRUE),
+    N_molar_mean = mean(N_molar, na.rm = TRUE),
+    H_onelab_mean = mean(H_onelab, na.rm = TRUE),
+    H_tot_wt_mean = mean(H_tot_wt, na.rm = TRUE),
+
+    C_onelab_median = median(C_onelab, na.rm = TRUE),
+    C_tot_molar_median = median(C_tot_molar, na.rm = TRUE),
+    N_onelab_median = median(N_onelab, na.rm = TRUE),
+    N_molar_median = median(N_molar, na.rm = TRUE),
+    H_onelab_median = median(H_onelab, na.rm = TRUE),
+    H_tot_wt_median = median(H_tot_wt, na.rm = TRUE)
+  )
+print(summary_stats)
+
+loa_stats <- df2 %>%
+  filter(!is.na(C_onelab), !is.na(C_tot_molar),
+         !is.na(N_onelab), !is.na(N_molar),
+         !is.na(H_onelab), !is.na(H_tot_wt)) %>%
+  summarise(
+    C_mean_diff = mean(C_onelab - C_tot_molar),
+    C_sd_diff   = sd(C_onelab - C_tot_molar),
+    N_mean_diff = mean(N_onelab - N_molar),
+    N_sd_diff   = sd(N_onelab - N_molar),
+    H_mean_diff = mean(H_onelab - H_tot_wt),
+    H_sd_diff   = sd(H_onelab - H_tot_wt)
+  ) %>%
+  mutate(
+    C_upper = C_mean_diff + 1.96 * C_sd_diff,
+    C_lower = C_mean_diff - 1.96 * C_sd_diff,
+    N_upper = N_mean_diff + 1.96 * N_sd_diff,
+    N_lower = N_mean_diff - 1.96 * N_sd_diff,
+    H_upper = H_mean_diff + 1.96 * H_sd_diff,
+    H_lower = H_mean_diff - 1.96 * H_sd_diff,
+
+    # % LoA
+    C_upper_pct = 100 * C_upper / summary_stats$C_collab_mean,
+    C_lower_pct = 100 * C_lower / summary_stats$C_collab_mean,
+    N_upper_pct = 100 * N_upper / summary_stats$N_collab_mean,
+    N_lower_pct = 100 * N_lower / summary_stats$N_collab_mean,
+    H_upper_pct = 100 * H_upper / summary_stats$H_collab_mean,
+    H_lower_pct = 100 * H_lower / summary_stats$H_collab_mean
+  )
+```

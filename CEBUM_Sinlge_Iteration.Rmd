@@ -836,7 +836,7 @@ if (model_type == "pls") {
 }
 ```
 
-##  Base model 1
+## Base model 1
 
 ```{r}
 
@@ -1206,7 +1206,7 @@ run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
                    use_source = FALSE, tuning_goal = "rmsep",  property_range = c(56, 59, 72)) #num_bootstrap = 5 ,
 ```
 
-### Viewing Feature Importance: PLSR 
+### Viewing Feature Importance: PLSR
 
 ```{r}
 

@@ -18,7 +18,7 @@ knitr::opts_chunk$set(echo = TRUE)
 required_packages <- c("writexl","readxl","randomForest", "caret", "pls", "data.table", "ithir", 
                        "dplyr", "tidyr", "prospectr", "globals", "stringr", 
                        "ggplot2", "here", "tidymodels", "parsnip", "plsmod", 
-                       "mixOmics", "yardstick", "purrr", "furrr", "tibble","ranger","VIM","shiny","FNN","lightgbm", "xgboost", "dials", "tune", "brnn", "recipes", "doParallel")
+                       "mixOmics", "yardstick", "purrr", "furrr", "tibble","ranger","VIM","shiny","FNN","lightgbm", "xgboost", "dials", "tune", "brnn", "nnet", "recipes", "doParallel","progressr")
 
 #VIM for KNN imputation
 # Load all required packages quietly without outputting any list of packages
@@ -39,10 +39,16 @@ set.seed(345)
 # cl <- makePSOCKcluster(cores)
 # registerDoParallel(cl)
 
+# progressr::handlers(
+#   progressr::handler_cli(
+#     format = ":message :bar (:current/:total) :percent",
+#     width  = 40
+#   )
+# )
 
 plan(
   multisession,
-  workers  = parallel::detectCores() - 1
+  workers  = 4
   # tweak    = list(seed = TRUE)
 )
 
@@ -56,6 +62,7 @@ options(future.seed = TRUE)
 
 # treated spectra
 spec_trt <- readRDS("spec_trt_MIR.RDS")
+
 spec_trt_MIR_lab <- readRDS("spec_trt_MIR_lab.RDS")
 spec_trt_NIR <- readRDS("/Users/soliverchefusi/Library/CloudStorage/OneDrive-Personal/R/ICRAF&Lehmann/ICRAF_IR/ICRAF_IR_R_Project/ICRAF_IR/CEBUM/CEBUM_NIR/CEBUM_NIR/spec_trt_NIR.RDS")
 spec_trt_NIR_lab <- readRDS("/Users/soliverchefusi/Library/CloudStorage/OneDrive-Personal/R/ICRAF&Lehmann/ICRAF_IR/ICRAF_IR_R_Project/ICRAF_IR/CEBUM/CEBUM_NIR/CEBUM_NIR/spec_trt_NIR_lab.RDS")
@@ -68,8 +75,11 @@ spec_trt_MIR_NIR_lab <- merge(spec_trt_MIR_lab,spec_trt_NIR_lab, by ="SSN")
 rownames(spec_trt_MIR_NIR_lab) <- spec_trt_MIR_NIR_lab$SSN
 
 # biochar property data
-#df1<-readRDS("df1.RDS")
-df1<-readRDS("df.f.RDS")
+
+#df1<-readRDS("df.f.RDS")
+
+df1 <- readRDS("df2_CHN.RDS")
+
 
 drop_vars <- c(
   "C_tot_avg", "C_org_wt", "C_inorg_wt", "N_tot_avg_wt",
@@ -280,7 +290,7 @@ preprocess_data <- function(boot_data, slprptr, p,
         
 
         if (include_zv) {
-            recipe_base <- recipe_base %>% step_zv() %>% step_nzv()
+            recipe_base <- recipe_base %>% step_zv() #%>% step_nzv()
         }
 
         # # Initialize feature reduction variables
@@ -348,31 +358,88 @@ preprocess_data <- function(boot_data, slprptr, p,
         }
 
         # # =========================== PLS ===========================
-        if (include_pls) {
-            if (is.null(variance_threshold_pls)) {
-              # No threshold, use default
-                recipe_base <- recipe_base %>%
-                    step_pls(all_numeric_predictors(), outcome = slprptr[p])
-            } else {
-              # Threshold given → pick the comp count that meets it
-                max_possible_comp <- min(ncol(train_data), nrow(train_data) - 1)
-                temp_recipe <- recipe_base %>%
-                    step_pls(all_numeric_predictors(), outcome = slprptr[p], num_comp = max_possible_comp)
+        # if (include_pls) {
+        #     if (is.null(variance_threshold_pls)) {
+        #       # No threshold, use default
+        #         recipe_base <- recipe_base %>%
+        #             step_pls(all_numeric_predictors(), outcome = slprptr[p])
+        #     } else {
+        #       # Threshold given → pick the comp count that meets it
+        #         max_possible_comp <- min(ncol(train_data), nrow(train_data) - 1)
+        #         temp_recipe <- recipe_base %>%
+        #             step_pls(all_numeric_predictors(), outcome = slprptr[p], num_comp = max_possible_comp)
+        # 
+        #         prepped_temp <- prep(temp_recipe, training = train_data, retain = TRUE)
+        #         #pls_results <- prepped_temp$steps[[1]]$res$Xvar
+        #         #cumulative_variance <- cumsum(pls_results) / sum(pls_results)
+        #         var_df <- tidy(prepped_temp, number = 1)      # step_pls is the first step we just added
+        #         cumulative_variance <- var_df$Xcumvar 
+        #         n_comp_pls <- which(cumulative_variance >= variance_threshold_pls)[1]
+        # 
+        #         if (!is.na(n_comp_pls) && n_comp_pls < 2) {
+        #             warning("PLS variance threshold too high, using fallback of 2 components.")
+        #             n_comp_pls <- 2
+        #         }
+        # 
+        #         recipe_base <- recipe_base %>%
+        #             step_pls(all_numeric_predictors(), outcome = slprptr[p], num_comp = n_comp_pls)
+        #     }
+        # }
+        
+        #second version
+        # ───────────────────── PLS dimensionality reduction ─────────────────────
 
-                prepped_temp <- prep(temp_recipe, training = train_data, retain = TRUE)
-                pls_results <- prepped_temp$steps[[1]]$res$Xvar
-                cumulative_variance <- cumsum(pls_results) / sum(pls_results)
-                n_comp_pls <- which(cumulative_variance >= variance_threshold_pls)[1]
+# ────────── PLS dimensionality-reduction (used only when the final model ≠ parsnip::pls) ──────────
 
-                if (!is.na(n_comp_pls) && n_comp_pls < 2) {
-                    warning("PLS variance threshold too high, using fallback of 2 components.")
-                    n_comp_pls <- 2
-                }
-
-                recipe_base <- recipe_base %>%
-                    step_pls(all_numeric_predictors(), outcome = slprptr[p], num_comp = n_comp_pls)
-            }
-        }
+if (include_pls && model_type != "pls") {
+  
+  if (!is.null(variance_threshold_pls)) {                       # ── CASE 1: threshold given
+    if (variance_threshold_pls <= 0 || variance_threshold_pls >= 1)
+      stop("variance_threshold_pls must be a proportion between 0 and 1.")
+    
+    #max_comp <- min(ncol(train_data), nrow(train_data) - 2)     # keep ≥2 df
+    
+    tmp_rec <- recipe_base %>% 
+      #step_zv(all_numeric_predictors()) %>%                     # drop flat wavelengths once
+      step_pls(all_numeric_predictors(),
+               outcome  = slprptr[p]) #,
+               #num_comp = max_comp)
+    
+    tmp_prep <- tryCatch(prep(tmp_rec, training = train_data, retain = TRUE),
+                         error = function(e) NULL)
+    if (is.null(tmp_prep)) return(NULL)                         # skip this bootstrap split
+    
+    cumvar <- tidy(tmp_prep, number = 2) |>                     # step 1 = zv, step 2 = pls
+              arrange(component) |> 
+              pull(Xcumvar)
+    
+    ## -------- choose component count -----------------------------------
+    target_comp  <- which(cumvar >= variance_threshold_pls)[1]  # may be integer(0)
+    max_possible <- length(cumvar)                              # row-rank of X
+    
+    n_comp_pls <- max(2, ifelse(length(target_comp) == 0,
+                                max_possible,                   # target unreachable
+                                min(target_comp, max_possible)))# target reachable
+    ## -------------------------------------------------------------------
+    
+    recipe_base <- recipe_base %>% 
+      step_zv(all_numeric_predictors()) %>%                     # final recipe
+      step_pls(all_numeric_predictors(),
+               outcome  = slprptr[p],
+               num_comp = n_comp_pls)
+    
+  } else {                                                      # ── CASE 2: no threshold
+    recipe_base <- recipe_base %>% 
+      #step_zv(all_numeric_predictors()) %>% 
+      step_pls(all_numeric_predictors(), outcome = slprptr[p])  # RMSEP rule
+    n_comp_pls <- 0L
+  }
+}
+        
+        
+        
+        
+        
         # 
         # # =========================== Feature Selection (RF) ===========================
         # if (include_rf && !is.null(forest_threshold)) {
@@ -499,12 +566,16 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
   response_var <- slprptr[.x]  # Define response variable
   
     if (is.null(results_list) || length(results_list) == 0) {
-    message("⚠️ No valid results for ", response_var, " in ", data_type)
+    message("⚠No valid results for ", response_var, " in ", data_type)
     return(tibble(
       Mean_R2 = NA, SD_R2 = NA, 
       Mean_RMSE = NA, SD_RMSE = NA, 
       Mean_Bias = NA, SD_Bias = NA,
       Mean_MAE = NA, SD_MAE = NA,
+      Mean_RPD= NA, SD_RPD = NA,
+      Mean_RPIQ = NA,SD_RPIQ = NA,
+      Mean_slope = NA, SD_slope = NA,
+      Mean_int = NA, SD_int  = NA,
       Property = response_var, 
       Data_Type = data_type, 
       Model = model_type
@@ -529,7 +600,7 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
     # Ensure truth and predictions are aligned
     if (length(truth) != nrow(predictions)) {
       message("Skipping metric calculation: Length mismatch between truth and predictions")
-      return(tibble(R_sq = NA, MAE = NA, RMSE = NA, bias = NA))
+      return(tibble(R_sq = NA, MAE = NA, RPD = NA, RPIQ = NA, slope = NA, intercept = NA, RMSE = NA, bias = NA))
     }
 
     # Safe computation function with error handling
@@ -543,9 +614,24 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
     rmse_value_plain <- safe_compute(rmse_vec(truth = truth, estimate = predictions$.pred))
     bias_value <- safe_compute(mean(predictions$.pred - truth, na.rm = TRUE) / mean(truth, na.rm = TRUE) * 100)
     
-    ##ADDING
+   
     mae_value  <- safe_compute(mae_vec(truth  = truth,
                                    estimate = predictions$.pred))
+ ##ADDING
+    # scale-dependent quality indices
+sd_y   <- safe_compute(sd(truth,  na.rm = TRUE))
+iqr_y  <- safe_compute(IQR(truth, na.rm = TRUE))
+
+rpd_val  <- if (!is.na(sd_y)  & !is.na(rmse_value_plain) && rmse_value_plain > 0)
+              sd_y  / rmse_value_plain else NA
+rpiq_val <- if (!is.na(iqr_y) & !is.na(rmse_value_plain) && rmse_value_plain > 0)
+              iqr_y / rmse_value_plain else NA
+
+# calibration-line coefficients on this bootstrap
+lm_fit   <- safe_compute(lm(.pred ~ truth, data = predictions))
+slope_v  <- if (!is.na(lm_fit[1])) coef(lm_fit)[2] else NA
+int_v    <- if (!is.na(lm_fit[1])) coef(lm_fit)[1] else NA
+    
     
     
       # Calculate the range of the response variable from the test_data and RMSEP/range
@@ -553,8 +639,13 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
   
   rmse_value <- if (!is.na(response_range) && response_range > 0) rmse_value_plain / (response_range / 10) else NA
   
-    return(tibble(R_sq = r2_value, RMSE = rmse_value, bias = bias_value, MAE = mae_value))
+    return(tibble(R_sq = r2_value, RMSE = rmse_value, bias = bias_value, MAE = mae_value, RPD  = rpd_val,
+              RPIQ = rpiq_val,
+              slope = slope_v,
+              intercept = int_v))
   })
+  
+  
   
 
     # 🔍 **Remove NULL results before summarization**
@@ -576,8 +667,11 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
       Mean_R2 = NA, SD_R2 = NA, 
       Mean_RMSE = NA, SD_RMSE = NA, 
       Mean_Bias = NA, SD_Bias = NA,
-      Mean_MAE = NA, SD_MAE = NA
-      
+      Mean_MAE = NA, SD_MAE = NA,
+      Mean_RPD= NA, SD_RPD = NA,
+      Mean_RPIQ = NA,SD_RPIQ = NA,
+      Mean_slope = NA, SD_slope = NA,
+      Mean_int = NA, SD_int  = NA
     ))
   }
   
@@ -590,7 +684,15 @@ calculate_metrics <- function(results_list, data_type, slprptr, .x, model_type) 
       Mean_Bias = mean(bias, na.rm = TRUE),
       SD_Bias = sd(bias, na.rm = TRUE),
       Mean_MAE  = mean(MAE,  na.rm = TRUE),
-      SD_MAE    = sd(MAE,    na.rm = TRUE)
+      SD_MAE    = sd(MAE,    na.rm = TRUE),
+      Mean_RPD  = mean(RPD,  na.rm = TRUE),
+      SD_RPD    = sd(RPD,    na.rm = TRUE),
+      Mean_RPIQ = mean(RPIQ, na.rm = TRUE),
+      SD_RPIQ   = sd(RPIQ,   na.rm = TRUE),
+      Mean_slope = mean(slope, na.rm = TRUE),
+      SD_slope   = sd(slope,   na.rm = TRUE),
+      Mean_int   = mean(intercept, na.rm = TRUE),
+      SD_int     = sd(intercept,   na.rm = TRUE)
     ) %>%
     mutate(Property = response_var, Data_Type = data_type, Model = model_type)
 
@@ -620,7 +722,10 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
   model_results <- list()
 
   # Loop through each property and collect metrics
-  all_metrics <- furrr::future_map_dfr(property_range, function(.x) {
+  all_metrics <- 
+  #   with_progress({
+  # p <- progressor(along = property_range)
+    furrr::future_map_dfr(property_range, function(.x) {
     tryCatch({
       message("Processing property: ", .x, " : ", slprptr[.x])
      
@@ -635,7 +740,7 @@ run_all_properties <- function(slprptr, df1, spec_trt, model_type, identifier,
     # Check if there are enough observations to proceed 
     if (nrow(df.sel) <= 20) {
       message(paste("Skipping property:", slprptr[.x], "due to insufficient data"))
-      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = model_type, R_sq = NA, MAE = NA, RMSE = NA, bias = NA, ncomp = NA))
+      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = model_type, R_sq = NA, MAE = NA, RPD = NA, RPIQ = NA, slope = NA, intercept = NA, RMSE = NA, bias = NA, ncomp = NA))
     }
     
   # Generate bootstrap resamples
@@ -650,6 +755,7 @@ if (is.null(boot_splits)) {
     Model = model_type,
     R_sq = NA,
     MAE = NA,
+    RPD = NA, RPIQ = NA, slope = NA, intercept = NA,
     RMSE = NA,
     bias = NA,
     ncomp = NA
@@ -667,7 +773,7 @@ if (is.null(boot_splits)) {
           # If boot_data is NULL, skip processing
     if (is.null(boot_data)) {
       message("Skipping property due to bootstrap failure: ", slprptr[.x])
-      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = model_type, R_sq = NA, MAE = NA, RMSE = NA, bias = NA, ncomp = NA))
+      return(tibble(Property = slprptr[.x], Data_Type = "Skipped", Model = model_type, R_sq = NA, MAE = NA, RPD = NA, RPIQ = NA, slope = NA, intercept = NA, RMSE = NA, bias = NA, ncomp = NA))
     }
 
     # Prepare bootstrap train/test splits
@@ -696,7 +802,7 @@ if (is.null(boot_splits)) {
       return(tibble(Property = slprptr[.x],
                     Data_Type = "Skipped",
                     Model = model_type,
-                    R_sq = NA, MAE = NA, RMSE = NA, bias = NA, ncomp = NA))
+                    R_sq = NA, MAE = NA, RPD = NA, RPIQ = NA, slope = NA, intercept = NA, RMSE = NA, bias = NA, ncomp = NA))
     }
 
 
@@ -828,14 +934,20 @@ if (is.null(boot_splits)) {
     tibble(Property = slprptr[.x],
            Data_Type = "Skipped",
            Model = model_type,
-           R_sq = NA, MAE = NA, RMSE = NA, bias = NA, ncomp = NA)
+           R_sq = NA, MAE = NA, RPD = NA, RPIQ = NA, slope = NA, intercept = NA, RMSE = NA, bias = NA, ncomp = NA)
   })
+      #p()
 },
   .options = furrr_options(seed = TRUE,
                            packages = c(
         "plsmod", "ranger", "dials", "tune", "workflows", "rsample", "yardstick")
 )
   )
+    # ensure the output directory exists
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  }
+  #}) ### close progress here
     output_file <- file.path(
     output_dir,
     paste0("bootstrap_metrics_", identifier, ".xlsx")
@@ -844,15 +956,11 @@ if (is.null(boot_splits)) {
   message("Metrics saved to: ", output_file)
   
   return(all_metrics)
+  }
 
-}
 ```
 
 ### Fitting Model (tuning hyperparameters)
-
-```{r}
-
-```
 
 ```{r}
 
@@ -924,6 +1032,7 @@ fit_model <- function(model_spec_list,
             Model     = model_type,
             R_sq      = NA,
             MAE       = NA,
+            RPD = NA, RPIQ = NA, slope = NA, intercept = NA,
             RMSE      = NA,
             bias      = NA,
             ncomp     = NA
@@ -1098,145 +1207,49 @@ Total split
 
 ```{r}
 
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 2, property_range = 25)# :39,41:72, 87,102))
+# # # Run analysis for all properties
+# identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_99perc_AlFeSiCa")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
+#                    use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 20, property_range = c(55,58,65:67))
 
 ```
 
-Source-based split
+### CHN as Features
 
 ```{r}
-
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-```
-
-Cornell only Predictions (focused on pH)
-
-```{r}
-
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_CornellOnlysplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-```
-
-#### Tune to minimize RMSEP - MIR 80/20 Split
-
-Need to change 0.7 to 0.8
-
-```         
-set.seed(123) 
-# Split ensuring Source is represented in both subsets
-trainIndex <- createDataPartition(df.sel$Source, p = 0.7, list = FALSE)
-
-} else { set.seed(123) # Split without considering Source trainIndex <- sample(seq_len(nrow(df.sel)), size = 0.7 * nrow(df.sel))
-```
-
-selecting the number of components that minimizes the RMSEP
-
-Total split
-
-```{r}
+# spec_trt_MIR_CHN <- readRDS("spec_trt_MIR_CHN.RDS")
 # 
-# # Run analysis for all properties
-# identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_99perc_80_20")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-#                    use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
+# # # Run analysis for all properties
+# identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_CHN_spec")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_CHN, model_type = "pls", identifier,
+#                    use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 20, property_range = c(1:112,117))
+##cant predict CHN using CHN! 
 ```
 
-Source-based split
+## CHN to predict
 
-```{r}
-# 
-# # Run analysis for all properties
-# identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_99perc_80_20")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-#                    use_source = TRUE, tuning_goal = "rmsep")
-```
-
-Cornell only Predictions (focused on pH)
+Change df1 to reference df2
 
 ```{r}
 
+#df1 <- readRDS("df2_CHN.RDS")
+
+
 # # Run analysis for all properties
-# identifier <- initialize_workspace("PLSR_RMSEP_MIR_CornellOnlysplit_99perc_80_20")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
-#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep")
-```
+# identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_CHN")  # For RMSEP
+# run_all_properties(slprptr,df1, spec_trt, model_type = "pls", identifier,
+#                    use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 20, property_range = c(113:116))
 
-#### Lab Covariate - MIR
-
-Zero-variance predictors don’t contribute to PLS components since they hold no information.
-
-```         
-•   Removing them has a marginal effect because PLSR naturally assigns zero weight to irrelevant predictors.
-
-•   Edge case: If your dataset is very small, leaving zero-variance predictors might slightly affect component selection due to noise in variance calculations.
-```
-
-Total split
-
-```{r}
-
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_Lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 Source-based split
 
 ```{r}
 
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_Lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-```
-
-Cornell only Predictions (focused on pH)
-
-\*\* don't make a difference
-
-#### PCA Components as features
-
-```{r}
-
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_PCAfeat")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =10, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-```
-
-\*\* Sparse Generalized Canonical Correlation Analysis (SGCCA) algorithm used in pls() modeling failed to find a stable solution within the allowed iterations.
-
-```{r}
-
-identifier <- initialize_workspace("PLSR_RMSEP_MI_totsplit_PCAfeat_variance")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.95, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-```
-
-#### RF Top Features as features
-
-```{r}
-
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_RFfeat")  # For RMSEP
-
-run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep", include_rf = TRUE, forest_threshold = 0.02) #, property_range = 2:5) 
-```
-
-```{r}
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_RFfeat_pretune")
-
-run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep", 
-                   include_rf = TRUE, forest_threshold = 0.02, rf_tuning_file = "Plots_WellFitted_Properties_RF_RMSEP_MIR_totsplit_99perc/all_metrics_RF_RMSEP_MIR_totsplit_99perc.xlsx")
+# # Run analysis for all properties
+# identifier <- initialize_workspace("PLSR_RMSEP_MIR_sourcesplit_99perc")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
+#                    use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 20) #, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 #### Tune to minimize RMSEP - NIR
@@ -1245,10 +1258,11 @@ Total split - NIR
 
 ```{r}
 
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_NIR_totsplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 50) #, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+# # Run analysis for all properties
+# identifier <- initialize_workspace("PLSR_RMSEP_NIR_totsplit_99perc")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
+#                    use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 20) #, property_range = c(40:42))# :39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))library(callr)
+
 ```
 
 Source-based split - NIR
@@ -1257,18 +1271,8 @@ Source-based split - NIR
 
 # Run analysis for all properties
 identifier <- initialize_workspace("PLSR_RMSEP_NIR_sourcesplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-```
-
-Cornell only Predictions - NIR
-
-```{r}
-
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_NIR_CornellOnlysplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier, 
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier,
+                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 20)# , property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 #### Tune to minimize RMSEP - MIR + NIR
@@ -1277,57 +1281,21 @@ Total split - MIR + NIR
 
 ```{r}
 
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_totsplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+# # Run analysis for all properties
+# identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_totsplit_99perc")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
+#                    use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 20) #, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 Source-based split - MIR + NIR
 
 ```{r}
 
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_sourcesplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+# # Run analysis for all properties
+# identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_sourcesplit_99perc")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
+#                    use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 20)# , property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
-
-Cornell only Predictions - MIR + NIR
-
-```{r}
-
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_CornellOnlysplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "pls", identifier, 
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-```
-
-#### Lab Covariate - MIR + NIR
-
-Total split - MIR + NIR
-
-```{r}
-
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_totsplit_Lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "pls", identifier, 
-                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-```
-
-Source-based split - MIR + NIR
-
-```{r}
-
-# Run analysis for all properties
-identifier <- initialize_workspace("PLSR_RMSEP_MIR_NIR_sourcesplit_Lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "pls", identifier, 
-                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-```
-
-Cornell only Predictions - MIR + NIR
-
-\*\* doesn't make sense to run
 
 ## RANDOM FOREST
 
@@ -1335,67 +1303,134 @@ Cornell only Predictions - MIR + NIR
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep",
-                   num_bootstrap = 50)#, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-```
-
-```{r}
-identifier <- initialize_workspace("RF_RMSEP_MIR_CornellOnlysplit_99perc")  # For RMSEP
-
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-
-```
-
-#### Tune to minimize RMSEP - MIR 80/20 Split
-
-```{r}
-# 
-# identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_99perc_80_20")  # For RMSEP
+# identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_99perc")  # For RMSEP
 # run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-#                    use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
+#                    use_source = FALSE, tuning_goal = "rmsep",
+#                    num_bootstrap = 20)#, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 ```{r}
 
-# identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_99perc_80_20")  # For RMSEP
+# identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_99perc_AlFeSiCa")  # For RMSEP
 # run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-#                    use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
+#                    use_source = FALSE, tuning_goal = "rmsep",
+#                    num_bootstrap = 20, property_range = c(55,58,65:67))
+```
+
+### CHN as Features
+
+```{r}
+# spec_trt_MIR_CHN <- readRDS("spec_trt_MIR_CHN.RDS")
+# 
+# # # Run analysis for all properties
+# identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_CHN_spec")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_CHN, model_type = "rf", identifier,
+#                    use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 20, property_range = c(1:112,117))
+
+##cant predict CHN using CHN! 
+```
+
+## CHN to predict
+
+Change df1 to reference df2
+
+```{r}
+
+#df1 <- readRDS("df2_CHN.RDS")
+
+
+# # # Run analysis for all properties
+# identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_CHN")  # For RMSEP
+# run_all_properties(slprptr,df1, spec_trt, model_type = "rf", identifier,
+#                    use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 40, property_range = c(113:116))
+
 ```
 
 ```{r}
-# identifier <- initialize_workspace("RF_RMSEP_MIR_CornellOnlysplit_99perc_80_20")  # For RMSEP
+
+# identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_99perc")  # For RMSEP
 # run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep") #,property_range = 25:55)
-
+#                    use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 20)#, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
-#### Lab Covariate - MIR
+#### Tune to minimize RMSEP - NIR
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+# identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_99perc")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,  
+#                    use_source = FALSE, tuning_goal = "rmsep",num_bootstrap = 20)#, property_range = 49:51)
 ```
+
+Source-based split - NIR
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+# Run analysis for all properties
+identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_99perc")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
+                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 20)# , property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
+
+#### Tune to minimize RMSEP - MIR + NIR
+
+```{r}
+
+# identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_99perc")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
+#                    use_source = FALSE, tuning_goal = "rmsep",num_bootstrap = 20)
+```
+
+#### Tune to minimize RMSEP - MIR + NIR
+
+```{r}
+
+# identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_99perc")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
+#                    use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 20)#, property_range = c(2:3))
+```
+
+## PLSR
+
+Cornell only Predictions
+
+```{r}
+
+# Run analysis for all properties
+# identifier <- initialize_workspace("PLSR_RMSEP_MIR_CornellOnlysplit_99perc")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier, 
+#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 20, include_zv = TRUE)#, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+```
+
+## RF
+
+Cornell only Predictions
+
+```{r}
+# identifier <- initialize_workspace("RF_RMSEP_MIR_CornellOnlysplit_99perc")  # For RMSEP
+# 
+# run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
+#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 20,include_zv = TRUE) #, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+
+```
+
+Cont form here
 
 #### No Zero Variance - MIR
+
+Zero-variance predictors don’t contribute to PLS components since they hold no information.
+
+• Removing them has a marginal effect because PLSR naturally assigns zero weight to irrelevant predictors.
+
+• Edge case: If your dataset is very small, leaving zero-variance predictors might slightly affect component selection due to noise in variance calculations.
+
+```{r}
+
+
+# identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_zv")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,  
+#                    use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE, num_bootstrap = 20)# , property_range =c(25:26))#39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+```
 
 (not really needed for tree based models)
 
@@ -1403,302 +1438,159 @@ run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_zv")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE, num_bootstrap = 30, property_range =c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+# identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_zv")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
+#                    use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE, num_bootstrap = 20) #, property_range =c(25:26))#39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
+
+#### PLSR Lab Covariate - MIR
+
+Total split
+
+\*warnings simply mean “I found a constant column in this fold.” - likely due to lab covariate column duuring splits.
 
 ```{r}
 
-# identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_zv")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-#                    use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+# Run analysis for all properties
+# identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_Lab")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "pls", identifier, 
+#                    use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 20, include_zv = TRUE) #, property_range = c(25:26)) #:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
-```{r}
-
-# identifier <- initialize_workspace("RF_RMSEP_MIR_CornellOnlysplit_zv")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", include_zv = TRUE, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-```
-
-#### Lab Covariate & No Zero Variance- MIR
+#### RF Lab Covariate - MIR
 
 ```{r}
 
 # identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_lab")  # For RMSEP
 # run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,  
-#                    use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+#                    use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 20, include_zv = TRUE) #, property_range = c(25:26)) #39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+```
+
+## Filtering out part of spectra
+
+```{r}
+
+# First, convert names to numeric (excluding "SSN")
+wavenumbers <- names(spec_trt)
+wavenumbers_num <- suppressWarnings(as.numeric(wavenumbers))  # will produce NA for "SSN"
+
+# Identify which column names are <= 4001.3 or "SSN"
+keep_cols <- wavenumbers_num <= 4001.3 | is.na(wavenumbers_num)  # keep "SSN"
+
+# Subset the data frame
+spec_trt_filtered <- spec_trt[, keep_cols]
+```
+
+```{r}
+# # Run analysis for all properties
+# identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_SpecSamp")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_filtered, model_type = "pls", identifier,
+#                    use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 20) #, property_range = c(39,41:72,87,102))
+
 ```
 
 ```{r}
 
-# identifier <- initialize_workspace("RF_RMSEP_MIR_sourcesplit_lab")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt_MIR_lab, model_type = "rf", identifier,
-#                    use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+# identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_SpecSamp")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_filtered, model_type = "rf", identifier,
+#                    use_source = FALSE, tuning_goal = "rmsep",
+#                    num_bootstrap = 20)#, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
+
+```{r}
+
+# identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_SpecSamp_CHN")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_filtered, model_type = "pls", identifier,
+#                    use_source = FALSE, tuning_goal = "rmsep", num_bootstrap = 40, property_range = c(113:116))
+```
+
+```{r}
+
+# identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_SpecSamp_CHN")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_filtered, model_type = "rf", identifier,
+#                    use_source = FALSE, tuning_goal = "rmsep",
+#                    num_bootstrap = 40, property_range = c(113:116))
+```
+
+## PLSR
+
+Cornell only Predictions
+
+```{r}
+
+# # Run analysis for all properties
+# identifier <- initialize_workspace("PLSR_RMSEP_MIR_CornellOnlysplit_SpecSamp")  # For RMSEP
+# run_all_properties(slprptr, df1, spec_trt_filtered, model_type = "pls", identifier,
+#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 20, include_zv = TRUE)#, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+```
+
+## RF
+
+Cornell only Predictions
+
+```{r}
+
+# identifier <- initialize_workspace("RF_RMSEP_MIR_CornellOnlysplit_SpecSamp")  # For RMSEP
+# # 
+# run_all_properties(slprptr, df1, spec_trt_filtered, model_type = "rf", identifier,
+#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", num_bootstrap = 20, include_zv = TRUE) #, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+
+```
+
+#\*\*\* cont from here
+
+## Sourcesplit
+
+```{r}
+
+# Run analysis for all properties
+identifier <- initialize_workspace("PLSR_RMSEP_NIR_sourcesplit_99perc")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "pls", identifier,
+                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 20)# , property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+```
+
+```{r}
+
+identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_99perc")  # #For RMSEP
+run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
+                   use_source = TRUE, tuning_goal = "rmsep", num_bootstrap = 20) #,property_range = 25:55)
+```
+
+# PCA Reduction
+
+## PLSR
 
 #### PCA Components as features
 
-Number of components
+Captured variance
 
 ```{r}
 
-identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_PCAfeat")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, num_pca_comp =20, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+identifier <- initialize_workspace("PLSR_RMSEP_MIR_totsplit_PCAfeat_variance")  # For RMSEP
+run_all_properties(slprptr, df1, spec_trt, model_type = "pls", identifier,
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.95, num_bootstrap = 20) #, property_range = c(5:6))# 39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
+
+## RF
+
+#### RF PCA Components as features
 
 Captured variance
 
 ```{r}
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_PCAfeat_Var")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.99, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
+run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
+                   use_source = FALSE, tuning_goal = "rmsep", include_pca = TRUE, variance_threshold = 0.95, num_bootstrap = 20) #, property_range = c(4:5))#5:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
-#### PLSR Components as features
+#### RF PLS Components as features
 
 ```{r}
 
 identifier <- initialize_workspace("RF_RMSEP_MIR_totspslit_PLSfeat_RMSEP")  # For RMSEP
 run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep", include_pls = TRUE, num_bootstrap = 30, property_range = c(25:39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_PLSfeat_Var") 
-
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep", include_pls = TRUE, variance_threshold_pls = 0.95)
-```
-
-#### RF Top Features as features
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_totsplit_RFfeat")  # For RMSEP
-
-run_all_properties(slprptr, df1, spec_trt, model_type = "rf", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep", include_rf = TRUE, forest_threshold = 0.02) #, property_range = 2:5) 
-```
-
-#### (Cont. from here 13/02/2025) Tune to minimize RMSEP - NIR
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep",num_bootstrap = 50)#, property_range = 49:51)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
-```
-
-```{r}
-identifier <- initialize_workspace("RF_RMSEP_NIR_CornellOnlysplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep") #,property_range = 25:55)
-
-```
-
-#### Lab Covariate - NIR
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
-```
-
-#### No Zero Variance - NIR
-
-```{r}
-
-# identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_zv")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,  
-#                    use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
-```
-
-```{r}
-
-# identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_zv")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
-#                    use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-```
-
-```{r}
-
-# identifier <- initialize_workspace("RF_RMSEP_NIR_CornellOnlysplit_zv")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt_NIR, model_type = "rf", identifier,
-#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-
-```
-
-#### Lab Covariate & No Zero Variance - NIR
-
-```{r}
-
-# identifier <- initialize_workspace("RF_RMSEP_NIR_totsplit_lab")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier,  
-#                    use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
-```
-
-```{r}
-
-# identifier <- initialize_workspace("RF_RMSEP_NIR_sourcesplit_lab")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt_NIR_lab, model_type = "rf", identifier,
-#                    use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-```
-
-#### Tune to minimize RMSEP - MIR + NIR
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
-                   use_source = FALSE, tuning_goal = "rmsep")
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep")
-```
-
-ERRORRR
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_CornellOnlysplit_99perc")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
-                   use_source = FALSE, source_name = "Cornell", tuning_goal = "rmsep")
-
-
-#Note: skips testing of all properties - insufficient data. 
-```
-
-#### Lab Covariate - MIR + NIR8
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "rf", identifier,  
-                   use_source = FALSE, tuning_goal = "rmsep")#, property_range = 49:51)
-```
-
-```{r}
-
-identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_lab")  # For RMSEP
-run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "rf", identifier,
-                   use_source = TRUE, tuning_goal = "rmsep") #,property_range = 25:55)
-```
-
-#### No Zero Variance - MIR +NIR
-
-```{r}
-
-# identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_zv")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,  
-#                    use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
-```
-
-```{r}
-
-# identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_zv")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
-#                    use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-```
-
-```{r}
-
-# identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_CornellOnlysplit_zv")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt_MIR_NIR, model_type = "rf", identifier,
-#                    use_source = FALSE, source_name = "Cornell ", tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-```
-
-#### Lab Covariate & No Zero Varaiance - MIR + NIR
-
-```{r}
-
-# identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_totsplit_lab")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "rf", identifier,  
-#                    use_source = FALSE, tuning_goal = "rmsep", include_zv = TRUE)#, property_range = 49:51)
-```
-
-```{r}
-
-# identifier <- initialize_workspace("RF_RMSEP_MIR_NIR_sourcesplit_lab")  # For RMSEP
-# run_all_properties(slprptr, df1, spec_trt_MIR_NIR_lab, model_type = "rf", identifier,
-#                    use_source = TRUE, tuning_goal = "rmsep", include_zv = TRUE) #,property_range = 25:55)
-```
-
-## GBDT
-
-```{r}
-
-# Run analysis for all properties
-identifier <- initialize_workspace("GBDT_RMSEP_MIR_totsplit")
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt,
-  model_type = "gbdt",  # Specify GBDT
-  use_source = FALSE,
-  tuning_goal = "rmsep",
-  identifier,
-  property_range = 52:55#length(slprptr)
-)
-```
-
-```{r}
-
-# # Run analysis for all properties
-# identifier <- initialize_workspace("GBDT_RMSEP_MIR_sourcesplit") 
-# 
-# run_all_properties(
-#   slprptr = slprptr,
-#   df1 = df1,
-#   spec_trt = spec_trt,
-#   model_type = "gbdt",  # Specify GBDT
-#   use_source = TRUE,
-#   tuning_goal = "rmsep",
-#   identifier,
-#   property_range = 2:length(slprptr)
-# )
-```
-
-```{r}
-
-# # Run analysis for all properties
-# identifier <- initialize_workspace("GBDT_RMSEP_MIR_CornellOnlysplit") 
-# 
-# run_all_properties(
-#   slprptr = slprptr,
-#   df1 = df1,
-#   spec_trt = spec_trt,
-#   model_type = "gbdt",  # Specify GBDT
-#   use_source = FALSE,
-#   source_name = "Cornell ",
-#   tuning_goal = "rmsep",
-#   identifier,
-#   property_range = 2:length(slprptr)
-# )
+                   use_source = FALSE, tuning_goal = "rmsep", include_pls = TRUE, num_bootstrap = 20)#, property_range = c(5:6))# 39,41:46,48,50,51,53,55,57,65,67,69,71,73,75,77))
 ```
 
 ## BRNN
@@ -1707,7 +1599,7 @@ run_all_properties(
 
 ```{r}
 
-identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit")
+identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit_PCAfeat")
 
 run_all_properties(
   slprptr = slprptr,
@@ -1716,190 +1608,41 @@ run_all_properties(
   model_type = "brnn",
   use_source = FALSE,
   tuning_goal = "rmsep",
-  property_range = 52:56, #length(slprptr),
-  #include_pca = TRUE,
-  identifier#,
+  #property_range = 52:53, #length(slprptr),
+  num_bootstrap = 20,
+  #include_zv = TRUE,
+  include_pca = TRUE,
+  identifier,
   #num_pca_comp = 20
-  #variance_threshold = 0.95
+  variance_threshold = 0.95
 )
 ```
 
+#### PCA Components as Features
+
 ```{r}
 
-identifier <- initialize_workspace("BRNN_RMSEP_MIR_sourcesplit")
+identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit_PCAfeat")
   
 run_all_properties(
   slprptr = slprptr,
   df1 = df1,
   spec_trt = spec_trt,
   model_type = "brnn",
-  use_source = TRUE,
-  tuning_goal = "rmsep",
-  #property_range = 52:56, #length(slprptr),
-  include_pca = TRUE,
-  identifier,
-  variance_threshold = 0.95
-)
-```
-
-#### Lab Covariate - MIR
-
-```{r}
-identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit_lab")
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_MIR_lab,
-  model_type = "brnn",
-  use_source = FALSE,
-  tuning_goal = "rmsep",
-  property_range = 2:length(slprptr),
-  include_pca = TRUE,
-  identifier,
-  variance_threshold = 0.95
-)
-```
-
-Stopped HERE
-
-```{r}
-identifier <- initialize_workspace("BRNN_RMSEP_MIR_sourcesplit_lab")
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_MIR_lab,
-  model_type = "brnn",
-  use_source = TRUE,
-  tuning_goal = "rmsep",
-  property_range = 2:length(slprptr),
-  identifier,
-  include_pca = TRUE,
-  variance_threshold = 0.95
-)
-```
-
-#### Tune to minimize RMSEP - NIR
-
-```{r}
-
-identifier <- initialize_workspace("BRNN_RMSEP_NIR_totsplit")
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_NIR,
-  model_type = "brnn",
   use_source = FALSE,
   tuning_goal = "rmsep",
   #property_range = 52:56, #length(slprptr),
-  include_pca = TRUE,
-  identifier,
-  num_pca_comp = 20
-  #variance_threshold = 0.95
-)
-```
-
-```{r}
-
-identifier <- initialize_workspace("BRNN_RMSEP_NIR_sourcesplit")
-  
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_NIR,
-  model_type = "brnn",
-  use_source = TRUE,
-  tuning_goal = "rmsep",
-  #property_range = 52:56, #length(slprptr),
+  num_bootstrap = 20,
   include_pca = TRUE,
   identifier,
   variance_threshold = 0.95
 )
 ```
 
-#### 
-
-#### Tune to minimize RMSEP - MIR + NIR
+#### PLS Components as Features
 
 ```{r}
-identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_totsplit")
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_MIR_NIR,
-  model_type = "brnn",
-  use_source = FALSE,
-  tuning_goal = "rmsep",
-  property_range = 2:length(slprptr),
-  identifier,
-  include_pca = TRUE,
-  variance_threshold = 0.95
-)
-```
-
-```{r}
-
-identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_sourcesplit")
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_MIR_NIR,
-  model_type = "brnn",
-  use_source = TRUE,
-  tuning_goal = "rmsep",
-  property_range = 2:length(slprptr),
-  identifier,
-  include_pca = TRUE,
-  variance_threshold = 0.95
-)
-```
-
-#### Lab Covariate - MIR
-
-```{r}
-
-identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_totsplit_lab")
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_MIR_NIR_lab,
-  model_type = "brnn",
-  use_source = FALSE,
-  tuning_goal = "rmsep",
-  property_range = 2:length(slprptr),
-  identifier,
-  include_pca = TRUE,
-  variance_threshold = 0.95
-)
-```
-
-```{r}
-
-identifier <- initialize_workspace("BRNN_RMSEP_MIR_NIR_sourcesplit_lab")
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt_MIR_NIR_lab,
-  model_type = "brnn",
-  use_source = TRUE,
-  tuning_goal = "rmsep",
-  property_range = 2:length(slprptr),
-  identifier,
-  include_pca = TRUE,
-  variance_threshold = 0.95
-)
-```
-
-#### PLSR Components as features
-
-```{r}
-
+# 
 identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit_PLSfeat")
 
 run_all_properties(
@@ -1909,55 +1652,11 @@ run_all_properties(
   model_type = "brnn",
   use_source = FALSE,
   tuning_goal = "rmsep",
-  #property_range = 52:56, #length(slprptr),
+  #property_range = 52:53, #length(slprptr),
+  num_bootstrap = 20,
   include_pls = TRUE,
+  #variance_threshold_pls = 0.85,
   identifier
   #variance_threshold = 0.95
 )
-```
-
-```{r}
-
-identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit_PLSfeat_Var")
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt,
-  model_type = "brnn",
-  use_source = FALSE,
-  tuning_goal = "rmsep",
-  #property_range = 52:56, #length(slprptr),
-  include_pls = TRUE,
-  identifier,
-  variance_threshold_pls = 0.95
-)
-```
-
-#### RF Top Features as features
-
-```{r}
-
-identifier <- initialize_workspace("BRNN_RMSEP_MIR_totsplit_RFfeat")  # For RMSEP
-
-run_all_properties(
-  slprptr = slprptr,
-  df1 = df1,
-  spec_trt = spec_trt,
-  model_type = "brnn",
-  use_source = FALSE,
-  tuning_goal = "rmsep",
-  #property_range = 52:56, #length(slprptr),
-  include_rf = TRUE,
-  identifier,
-  forest_threshold = 0.99 #try 0.10 if 'too many weights' error is persistent
-)
-```
-
-## Stop R workers
-
-Stop running the separate R processes (in parallel)
-
-```{r}
-#stopCluster(cl)
 ```

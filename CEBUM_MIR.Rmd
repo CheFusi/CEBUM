@@ -298,6 +298,48 @@ saveRDS(nwraw0,"nwraw0.RDS")
 # nwraw0[1:5,1:5]
 ```
 
+### Plot spectra by class
+
+```{r}
+
+nwraw0 <- readRDS("nwraw0.RDS")
+
+df1 <- readRDS("df2_CHN.RDS")
+
+## 1.  Keep the ID and the grouping variable
+meta <- df1 %>% 
+  select(SSN, Temp.)
+
+## 2.  Merge with the spectra (spec_trt must have an SSN column)
+spec_join <- nwraw0 %>% 
+  inner_join(meta, by = "SSN")
+
+## 3.  Pivot spectral columns to long format
+spec_class_long <- spec_join %>% 
+  pivot_longer(
+    cols      = -c(SSN, Temp.),   # all spectral columns
+    names_to  = "wavenumber",
+    values_to = "absorbance"
+  ) %>% 
+  mutate(
+    wavenumber = as.numeric(
+      gsub("^X", "", wavenumber)          # drop leading “X” if present
+    )
+  )
+
+## 4.  Plot spectra coloured by Primary.Class
+ggplot(spec_class_long, aes(x = wavenumber,
+                      y = absorbance,
+                      group = SSN,
+                      colour = Temp.)) +
+  geom_line(alpha = 0.5, linewidth = 0.3) +
+  scale_x_reverse() +                # MIR/NIR spectra read high→low cm-1
+  labs(x = "Wavenumber (cm⁻¹)",
+       y = "Absorbance (A.U.)",
+       colour = "Primary class") +
+  theme_minimal(base_size = 12)
+```
+
 ### Savitzky Golay and Mean Centering
 
 ```{r}
@@ -761,7 +803,10 @@ spec_trt <- spec_trt[,-2] #removing the data for the first wavenumber since it's
 #  names(spectraldata)[1] <- "SSN"
 
 #Read reference data
-df1=read.csv("/Users/soliverchefusi/Library/CloudStorage/OneDrive-Personal/R/ICRAF&Lehmann/ICRAF_IR/ICRAF_IR_R_Project/ICRAF_IR/CEBUM/CEBUM_Reference_Data.csv")#, skip=5)#[,c(1,8:29)]
+#df1=read.csv("/Users/soliverchefusi/Library/CloudStorage/OneDrive-Personal/R/ICRAF&Lehmann/ICRAF_IR/ICRAF_IR_R_Project/ICRAF_IR/CEBUM/CEBUM_Reference_Data.csv")#, skip=5)#[,c(1,8:29)]
+
+df1=read.csv("/Users/soliverchefusi/Library/CloudStorage/OneDrive-Personal/R/ICRAF&Lehmann/ICRAF_IR/ICRAF_IR_R_Project/ICRAF_IR/CEBUM/CEBUM_Reference_Data_Maithili_10_02_2025.csv")
+
 
 #TEMPORARY, UNTIL I RECIEVE THE REMAINING DATA 
 #df1<-df1[c(1:84),-c(5:24)]
@@ -835,7 +880,7 @@ df.f_master <-df.f
 saveRDS(df.f,"df.f.RDS")
 ```
 
-### Lab Covariate 
+### Lab Covariate
 
 3rd February
 
@@ -860,6 +905,23 @@ spec_trt_lab <- spec_trt %>%
 spec_trt_lab[is.na(spec_trt_lab)] <- 0
 
 saveRDS(spec_trt_lab,"spec_trt_MIR_lab.RDS")
+```
+
+## CorgHN as Features
+
+```{r}
+
+
+Cornell_CHN <- readRDS("Cornell_CHN.RDS")
+
+df_corr_cols <- Cornell_CHN %>%
+  select(SSN, N_corrected, C_org_corrected, H_corrected)
+
+# 2) merge onto df1
+spec_trt_CHN <- spec_trt %>%
+  left_join(df_corr_cols, by = "SSN")
+
+saveRDS(spec_trt_CHN,"spec_trt_MIR_CHN.RDS")
 ```
 
 ## Summary statistics
